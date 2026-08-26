@@ -1,0 +1,19 @@
+[project]
+name = "ipcv"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "psyvern", email = "psyv3rn@proton.me" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "colored>=2.3.2",
+]
+
+[project.scripts]
+ipcv = "ipcv:main"
+
+[build-system]
+requires = ["uv_build>=0.12.3,<0.13.0"]
+build-backend = "uv_build"
