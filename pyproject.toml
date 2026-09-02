@@ -2,18 +2,26 @@
 name = "ipcv"
 version = "0.1.0"
 description = "Add your description here"
-readme = "README.md"
+# readme = "README.md"
 authors = [
     { name = "psyvern", email = "psyv3rn@proton.me" }
 ]
 requires-python = ">=3.13"
 dependencies = [
     "colored>=2.3.2",
+    "opencv-python>=5.0.0.93",
 ]
 
 [project.scripts]
-ipcv = "ipcv:main"
+ipc = ".sender:main"
+
+[tool.uv.build-backend]
+module-root = ""
+module-name = "src"
 
 [build-system]
 requires = ["uv_build>=0.12.3,<0.13.0"]
 build-backend = "uv_build"
+
+[tool.ty.environment]
+extra-paths = ["./src"]
