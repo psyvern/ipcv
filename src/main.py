@@ -32,7 +32,7 @@ CPU_THRESHOLD = 80  # percentage above which to warn
 
 
 CAM_AUDIO_MAP = {
-    0: "hw:2,0",
+    0: "hw:0,0",
     2: "hw:3,0",
 }
 
@@ -156,7 +156,7 @@ class CameraSystem:
                 '-preset', VELOCITA,
                 '-crf', '23',
                 '-r', framerate,  # force output to same FPS
-                '-vf', 'transpose=2,transpose=2',
+                # '-vf', 'transpose=2,transpose=2',
                 '-c:a', 'aac',
                 '-b:a', '192k',
                 '-pix_fmt', 'yuv420p',
@@ -240,8 +240,8 @@ class CameraSystem:
                 ret, frame = cap.read()
                 if ret:
                     # Resize to 640x360 (modifiable)
-                    frame = cv2.resize(frame, (640, 360))
-                    frame = cv2.rotate(frame, cv2.ROTATE_180)
+                    # frame = cv2.resize(frame, (640, 360))
+                    # frame = cv2.rotate(frame, cv2.ROTATE_180)
                     frames.append(frame)
 
 
