@@ -1,0 +1,7 @@
+/target
+
+/output
+
+flake.nix
+flake.lock
+justfile
