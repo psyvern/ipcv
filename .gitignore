@@ -5,3 +5,5 @@
 flake.nix
 flake.lock
 justfile
+.idea
+.venv

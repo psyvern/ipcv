@@ -17,7 +17,7 @@ use std::io::Write;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use std::{fs::File, net::IpAddr, os::fd::AsRawFd, path::PathBuf};
+use std::{fs::File, net::IpAddr, path::PathBuf};
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinSet;
@@ -257,8 +257,7 @@ async fn main() -> std::io::Result<()> {
     let args = Args::parse();
     println!("{args:?}");
 
-    let stdin = std::io::stdin();
-    let old_term = TermMode::new(stdin.as_raw_fd())?;
+    let old_term = TermMode::new()?;
 
     let socket = Arc::new(UdpSocket::bind((Ipv4Addr::UNSPECIFIED, args.port)).await?);
     // socket.reuse_address(true);

@@ -1,4 +1,7 @@
-use std::{collections::VecDeque, os::fd::RawFd, time::Duration};
+use std::{collections::VecDeque, time::Duration};
+
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use itertools::Itertools;
@@ -17,20 +20,15 @@ pub fn is_closing_key(event: KeyEvent) -> bool {
 cfg_select! {
     unix => {
         pub struct TermMode {
-            fd: RawFd,
+            fd: std::os::fd::RawFd,
             original: termios::Termios,
         }
-    }
-    _ => {
-        pub struct TermMode;
-    }
-}
 
-impl TermMode {
-    pub fn new(fd: RawFd) -> std::io::Result<Self> {
-        cfg_select! {
-            unix => {
-                let mut original = termios::Termios::from_fd(0)?;
+        impl TermMode {
+            pub fn new() -> std::io::Result<Self> {
+                let stdin = std::io::stdin();
+                let fd = stdin.as_raw_fd();
+                let mut original = termios::Termios::from_fd(fd)?;
                 termios::tcgetattr(fd, &mut original)?;
 
                 let mut new = original.clone();
@@ -41,19 +39,22 @@ impl TermMode {
 
                 Ok(Self { fd, original })
             }
-            _ => Ok(Self),
         }
-    }
-}
 
-impl Drop for TermMode {
-    fn drop(&mut self) {
-        cfg_select! {
-            unix => {
+        impl Drop for TermMode {
+            fn drop(&mut self) {
                 termios::tcsetattr(self.fd, termios::TCSAFLUSH, &self.original)
                     .expect("Can't restore term mode");
             }
-            _ => {}
+        }
+    }
+    _ => {
+        pub struct TermMode;
+
+        impl TermMode {
+            pub fn new() -> std::io::Result<Self> {
+                Ok(Self)
+            }
         }
     }
 }
