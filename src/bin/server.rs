@@ -6,8 +6,8 @@ use image::{ImageBuffer, Rgb};
 use ipcv::ClientMessage;
 use ipcv::ClientMessageParser;
 use ipcv::ServerMessage;
+use ipcv::TermMode;
 use ipcv::is_closing_key;
-use ipcv::set_term_mode;
 use itertools::Itertools;
 use nokhwa::FormatDecoder;
 use nokhwa::pixel_format::RgbFormat;
@@ -258,7 +258,7 @@ async fn main() -> std::io::Result<()> {
     println!("{args:?}");
 
     let stdin = std::io::stdin();
-    let old_term = set_term_mode(stdin.as_raw_fd())?;
+    let old_term = TermMode::new(stdin.as_raw_fd())?;
 
     let socket = Arc::new(UdpSocket::bind((Ipv4Addr::UNSPECIFIED, args.port)).await?);
     // socket.reuse_address(true);
@@ -287,7 +287,7 @@ async fn main() -> std::io::Result<()> {
         }
     }
 
-    termios::tcsetattr(stdin.as_raw_fd(), termios::TCSAFLUSH, &old_term)?;
+    drop(old_term);
 
     Ok(())
 }

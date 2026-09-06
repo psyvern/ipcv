@@ -2,7 +2,7 @@ use clap::Parser;
 use colored::Colorize;
 use crossterm::event::{EventStream, KeyCode, KeyEvent, KeyModifiers};
 use futures::{FutureExt, StreamExt};
-use ipcv::{is_closing_key, set_term_mode};
+use ipcv::{TermMode, is_closing_key};
 use nokhwa::{
     CallbackCamera,
     utils::{CameraFormat, CameraIndex, FrameFormat, RequestedFormat, RequestedFormatType},
@@ -199,7 +199,7 @@ async fn main() -> std::io::Result<()> {
     println!("{args:?}");
 
     let stdin = std::io::stdin();
-    let old_term = set_term_mode(stdin.as_raw_fd())?;
+    let old_term = TermMode::new(stdin.as_raw_fd())?;
 
     let index = CameraIndex::Index(0);
     let format = RequestedFormat::with_formats(
@@ -217,8 +217,8 @@ async fn main() -> std::io::Result<()> {
 
     let result = run(args, &mut camera).await;
 
-    termios::tcsetattr(stdin.as_raw_fd(), termios::TCSAFLUSH, &old_term)?;
     camera.stop_stream().unwrap();
+    drop(old_term);
 
     result
 }

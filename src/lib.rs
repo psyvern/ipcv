@@ -14,17 +14,48 @@ pub fn is_closing_key(event: KeyEvent) -> bool {
     )
 }
 
-pub fn set_term_mode(fd: RawFd) -> std::io::Result<termios::Termios> {
-    let mut old = termios::Termios::from_fd(0)?;
-    termios::tcgetattr(fd, &mut old)?;
+cfg_select! {
+    unix => {
+        pub struct TermMode {
+            fd: RawFd,
+            original: termios::Termios,
+        }
+    }
+    _ => {
+        pub struct TermMode;
+    }
+}
 
-    let mut new = old.clone();
-    termios::cfmakeraw(&mut new);
-    new.c_oflag |= termios::OPOST;
+impl TermMode {
+    pub fn new(fd: RawFd) -> std::io::Result<Self> {
+        cfg_select! {
+            unix => {
+                let mut original = termios::Termios::from_fd(0)?;
+                termios::tcgetattr(fd, &mut original)?;
 
-    termios::tcsetattr(fd, termios::TCSAFLUSH, &new)?;
+                let mut new = original.clone();
+                termios::cfmakeraw(&mut new);
+                new.c_oflag |= termios::OPOST;
 
-    Ok(old)
+                termios::tcsetattr(fd, termios::TCSAFLUSH, &new)?;
+
+                Ok(Self { fd, original })
+            }
+            _ => Ok(Self),
+        }
+    }
+}
+
+impl Drop for TermMode {
+    fn drop(&mut self) {
+        cfg_select! {
+            unix => {
+                termios::tcsetattr(self.fd, termios::TCSAFLUSH, &self.original)
+                    .expect("Can't restore term mode");
+            }
+            _ => {}
+        }
+    }
 }
 
 pub enum ServerMessage {
