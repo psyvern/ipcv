@@ -1,6 +1,7 @@
 use clap::Parser;
 use colored::Colorize;
 use crossterm::event::{EventStream, KeyCode, KeyEvent, KeyModifiers};
+use futures::SinkExt;
 use futures::{FutureExt, StreamExt};
 use image::{ImageBuffer, Rgb};
 use ipcv::ClientMessage;
@@ -24,10 +25,16 @@ use tokio::task::JoinSet;
 use tokio::{net::UdpSocket, select};
 use tokio_util::sync::CancellationToken;
 
+#[path = "../gui.rs"]
+pub mod gui;
+use ipcv::{GuiCommand, ServerEvent};
+
+pub static ARGS: std::sync::OnceLock<Args> = std::sync::OnceLock::new();
+
 const MCAST_GRP: &str = "224.1.1.1";
 
 #[derive(Debug, Clone, Parser)]
-struct Args {
+pub struct Args {
     /// Communication port (must be the same in clients)
     #[arg(long, short, default_value_t = 5007)]
     port: u16,
@@ -43,6 +50,9 @@ struct Args {
     /// Output directory
     #[arg(long, short, default_value = "output")]
     output: PathBuf,
+    /// Enable Terminal User Interface (TUI) alongside the GUI
+    #[arg(long)]
+    pub tui: bool,
 }
 
 #[derive(Debug)]
@@ -87,6 +97,7 @@ async fn connection_thread(
     token: CancellationToken,
     mut stream: TcpStream,
     socket: Arc<UdpSocket>,
+    mut output: futures::channel::mpsc::Sender<gui::Message>,
 ) {
     let mut counter = 0;
 
@@ -132,9 +143,13 @@ async fn connection_thread(
                         let frame =
                             ImageBuffer::<Rgb<u8>, _>::from_vec(width, height, bytes).unwrap();
 
-                        frame
-                            .save(directory.join(format!("{counter:05}.png")))
-                            .unwrap();
+                        let frame_arc = Arc::new(frame);
+                        let _ = output.send(gui::Message::ServerEvent(ServerEvent::FrameReceived {
+                            address,
+                            frame_number: counter as u64,
+                            frame: frame_arc,
+                        })).await;
+
                         println!("Received frame {} from {}", counter.to_string().bright_cyan().bold(), address.to_string().bright_green().bold());
                         counter += 1;
 
@@ -152,13 +167,13 @@ async fn loop_iteration(
     join_set: &mut JoinSet<IpAddr>,
     data_socket: &Arc<UdpSocket>,
     listener: &mut TcpListener,
+    output: &mut futures::channel::mpsc::Sender<gui::Message>,
+    key_rx: &mut tokio::sync::mpsc::UnboundedReceiver<crossterm::event::KeyEvent>,
 ) -> Option<bool> {
-    let mut events = EventStream::new();
-    let event = events.next().fuse();
     let mut data = [0u8; 4096];
 
     select! {
-        Some(Ok(crossterm::event::Event::Key(x))) = event => {
+        Some(x) = key_rx.recv() => {
             match x {
                 KeyEvent { code: KeyCode::Char('h'), modifiers: KeyModifiers::NONE, .. } => {
                     print_clients(clients);
@@ -184,7 +199,7 @@ async fn loop_iteration(
                 let data = String::from_utf8(data.to_vec()).unwrap();
                 let (width, height, format, host) = data.splitn(4, " ").next_tuple().unwrap();
 
-                if let Some(info) = clients.get(&address) {
+                if let Some(_info) = clients.get(&address) {
                     data_socket.send_to(
                         &ServerMessage::Start { port: settings.tcp_port, interval: settings.update_interval }.to_bytes(),
                         (address, settings.port),
@@ -208,12 +223,18 @@ async fn loop_iteration(
                         let token = token.clone();
                         let (stream, _) = listener.accept().await.unwrap();
                         let socket = data_socket.clone();
+                        let output_clone = output.clone();
 
                         join_set.spawn(async move {
-                            connection_thread(width, height, format, address, settings, token, stream, socket).await;
+                            connection_thread(width, height, format, address, settings, token, stream, socket, output_clone).await;
                             address
                         });
                     }
+
+                    let _ = output.send(gui::Message::ServerEvent(ServerEvent::ClientConnected {
+                        address,
+                        host: host.to_owned(),
+                    })).await;
 
                     let info = ClientInfo {
                         host: host.to_owned(),
@@ -252,41 +273,80 @@ async fn loop_iteration(
     None
 }
 
-#[tokio::main]
-async fn main() -> std::io::Result<()> {
-    let args = Args::parse();
-    println!("{args:?}");
-
-    let old_term = TermMode::new()?;
+pub async fn server_loop(
+    args: Args,
+    mut output: futures::channel::mpsc::Sender<gui::Message>,
+) -> std::io::Result<()> {
+    let old_term = if args.tui {
+        Some(TermMode::new()?)
+    } else {
+        None
+    };
 
     let socket = Arc::new(UdpSocket::bind((Ipv4Addr::UNSPECIFIED, args.port)).await?);
-    // socket.reuse_address(true);
     socket.join_multicast_v4(MCAST_GRP.parse().unwrap(), Ipv4Addr::UNSPECIFIED)?;
 
     let mut clients = HashMap::new();
     let mut join_set = JoinSet::new();
     let mut listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, args.tcp_port)).await?;
 
+    let _ = output
+        .send(gui::Message::ServerEvent(ServerEvent::Started))
+        .await;
+
+    let (key_tx, mut key_rx) = tokio::sync::mpsc::unbounded_channel();
+    let _keep_alive = key_tx.clone(); // Prevents key_rx from closing if tui is false
+
+    if args.tui {
+        tokio::spawn(async move {
+            let mut events = EventStream::new();
+            while let Some(Ok(event)) = events.next().await {
+                if let crossterm::event::Event::Key(k) = event {
+                    if key_tx.send(k).is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
     loop {
-        let force =
-            loop_iteration(&args, &mut clients, &mut join_set, &socket, &mut listener).await;
+        let force = loop_iteration(
+            &args,
+            &mut clients,
+            &mut join_set,
+            &socket,
+            &mut listener,
+            &mut output,
+            &mut key_rx,
+        )
+        .await;
 
         if let Some(force) = force {
             let msg = ServerMessage::Quit { force }.to_bytes();
             for (address, info) in clients {
                 println!("Closing connection to `{}`", info.host);
                 socket.send_to(&msg, (address, info.port)).await?;
-
                 info.token.cancel();
             }
 
             join_set.join_all().await;
-
             break;
         }
     }
 
-    drop(old_term);
-
+    if let Some(term) = old_term {
+        drop(term);
+    }
+    
+    let _ = output.send(gui::Message::ServerEvent(ServerEvent::Stopped)).await;
     Ok(())
+}
+
+fn main() -> iced::Result {
+    let args = Args::parse();
+    println!("{args:?}");
+    ARGS.set(args).unwrap();
+
+    gui::run()
 }

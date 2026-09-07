@@ -126,3 +126,27 @@ impl ClientMessageParser {
         }
     }
 }
+
+use image::{ImageBuffer, Rgb};
+use std::net::IpAddr;
+use std::sync::Arc;
+
+#[derive(Debug, Clone)]
+pub enum ServerEvent {
+    Started,
+    Stopped,
+    ClientConnected { address: IpAddr, host: String },
+    HeartbeatTick,
+    FrameReceived {
+        address: IpAddr,
+        frame_number: u64,
+        frame: Arc<ImageBuffer<Rgb<u8>, Vec<u8>>>,
+    },
+    Log(String),
+}
+
+#[derive(Debug, Clone)]
+pub enum GuiCommand {
+    DisconnectClient(IpAddr),
+    Shutdown { force: bool },
+}
