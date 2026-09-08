@@ -53,6 +53,9 @@ pub struct Args {
     /// Enable Terminal User Interface (TUI) alongside the GUI
     #[arg(long)]
     pub tui: bool,
+    /// Network interface IP to use
+    #[arg(long, default_value = "0.0.0.0")]
+    ip: Ipv4Addr,
 }
 
 #[derive(Debug)]
@@ -283,12 +286,12 @@ pub async fn server_loop(
         None
     };
 
-    let socket = Arc::new(UdpSocket::bind((Ipv4Addr::UNSPECIFIED, args.port)).await?);
-    socket.join_multicast_v4(MCAST_GRP.parse().unwrap(), Ipv4Addr::UNSPECIFIED)?;
+    let socket = Arc::new(UdpSocket::bind((args.ip, args.port)).await?);
+    socket.join_multicast_v4(MCAST_GRP.parse().unwrap(), args.ip)?;
 
     let mut clients = HashMap::new();
     let mut join_set = JoinSet::new();
-    let mut listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, args.tcp_port)).await?;
+    let mut listener = TcpListener::bind((args.ip, args.tcp_port)).await?;
 
     let _ = output
         .send(gui::Message::ServerEvent(ServerEvent::Started))

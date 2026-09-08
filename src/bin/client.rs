@@ -14,7 +14,7 @@ use std::{
 
 use tokio::{
     io::AsyncWriteExt,
-    net::{TcpStream, UdpSocket},
+    net::{TcpSocket, TcpStream, UdpSocket},
     select,
 };
 
@@ -26,22 +26,29 @@ struct Args {
     #[arg(long, short, default_value_t = 5007)]
     port: u16,
     /// Delay between sending (in seconds)
-    #[arg(long, short, default_value_t = 5.0)]
+    #[arg(long, short, default_value_t = 0.5)]
     update_delay: f64,
     /// Log additional data
     #[arg(long, short)]
     debug: bool,
+    /// Network interface IP to use
+    #[arg(long, default_value = "0.0.0.0")]
+    ip: Ipv4Addr,
+    /// Camera index
+    #[arg(long, short, default_value_t = 0)]
+    camera_index: u32,
 }
 
 async fn wait_for_server(
     port: u16,
+    ip: Ipv4Addr,
     camera_format: CameraFormat,
 ) -> std::io::Result<Option<(SocketAddr, Duration)>> {
-    let output = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
+    let output = UdpSocket::bind((ip, 0)).await?;
     output.set_ttl(2)?;
     output.connect((MCAST_GRP, port)).await?;
 
-    let input_socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, port)).await?;
+    let input_socket = UdpSocket::bind((ip, port)).await?;
     // input_socket.set_timeout(5);
 
     let initial_message = format!(
@@ -98,11 +105,15 @@ async fn wait_for_server(
 async fn client_thread(
     camera: &mut CallbackCamera,
     port: u16,
+    ip: Ipv4Addr,
     address: SocketAddr,
     time: Duration,
 ) -> std::io::Result<bool> {
-    let input = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, port)).await?;
-    let mut output = TcpStream::connect(address).await.unwrap();
+    let input = UdpSocket::bind((ip, port)).await?;
+    
+    let socket = TcpSocket::new_v4()?;
+    socket.bind(SocketAddr::new(std::net::IpAddr::V4(ip), 0))?;
+    let mut output = socket.connect(address).await.unwrap();
 
     let mut events = EventStream::new();
     let mut data = [0u8; 1024];
@@ -176,13 +187,13 @@ async fn run(args: Args, camera: &mut CallbackCamera) -> std::io::Result<()> {
     );
 
     loop {
-        let Some((address, delay)) = wait_for_server(args.port, camera_format).await? else {
+        let Some((address, delay)) = wait_for_server(args.port, args.ip, camera_format).await? else {
             break;
         };
 
         println!("Connected to {}", address.to_string().bright_green().bold());
 
-        let retry = client_thread(camera, args.port, address, delay).await?;
+        let retry = client_thread(camera, args.port, args.ip, address, delay).await?;
 
         if !retry {
             break;
@@ -199,7 +210,7 @@ async fn main() -> std::io::Result<()> {
 
     let old_term = TermMode::new()?;
 
-    let index = CameraIndex::Index(0);
+    let index = CameraIndex::Index(args.camera_index);
     let format = RequestedFormat::with_formats(
         RequestedFormatType::AbsoluteHighestFrameRate,
         &[
