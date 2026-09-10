@@ -116,7 +116,7 @@ async fn connection_thread(
                 break;
             }
             _ = interval_2.tick() => {
-                socket.send_to(&ServerMessage::Heartbeat.to_bytes(), (address, settings.port)).await.unwrap();
+                socket.send_to(&ServerMessage::Heartbeat.into_bytes(), (address, settings.port)).await.unwrap();
             }
             Ok(amount) = stream.read(&mut packet) => {
                 interval.reset();
@@ -125,12 +125,9 @@ async fn connection_thread(
                 match reader.read(&packet[..amount]) {
                     None => {},
                     Some(ClientMessage::Close) => return,
-                    Some(ClientMessage::Frame(mut bytes)) => {
-                        let bytes = bytes.make_contiguous();
-                        let bytes = RgbFormat::write_output(format, Resolution::new(width, height), bytes).unwrap();
-
-                        let frame =
-                            ImageBuffer::<Rgb<u8>, _>::from_vec(width, height, bytes).unwrap();
+                    Some(ClientMessage::Frame(bytes)) => {
+                        let bytes = RgbFormat::write_output(format, Resolution::new(width, height), &bytes).unwrap();
+                        let frame = ImageBuffer::<Rgb<u8>, _>::from_vec(width, height, bytes).unwrap();
 
                         frame
                             .save(directory.join(format!("{counter:05}.png")))
@@ -181,23 +178,30 @@ async fn loop_iteration(
             let data = &data[..size];
 
             if let Some(data) = data.strip_prefix(b"open ") {
-                let data = String::from_utf8(data.to_vec()).unwrap();
-                let (width, height, format, host) = data.splitn(4, " ").next_tuple().unwrap();
+                let mut data = data.iter().copied();
+                let width = u32::from_be_bytes(data.next_array().unwrap());
+                let height = u32::from_be_bytes(data.next_array().unwrap());
+                let format = match data.next().unwrap() {
+                    0 => FrameFormat::MJPEG,
+                    1 => FrameFormat::YUYV,
+                    2 => FrameFormat::NV12,
+                    3 => FrameFormat::GRAY,
+                    4 => FrameFormat::RAWRGB,
+                    5 => FrameFormat::RAWBGR,
+                    x => panic!("Unknown frame format: {x}"),
+                };
+                let host = String::from_utf8(data.collect()).unwrap();
 
                 if let Some(info) = clients.get(&address) {
                     data_socket.send_to(
-                        &ServerMessage::Start { port: settings.tcp_port, interval: settings.update_interval }.to_bytes(),
+                        &ServerMessage::Start { port: settings.tcp_port, interval: settings.update_interval }.into_bytes(),
                         (address, settings.port),
                     ).await.unwrap();
 
                     println!("Reconnected to `{}`", address);
                 } else {
-                    let width = width.parse().unwrap();
-                    let height = height.parse().unwrap();
-                    let format = format.parse().unwrap();
-
                     data_socket.send_to(
-                        &ServerMessage::Start { port: settings.tcp_port, interval: settings.update_interval }.to_bytes(),
+                        &ServerMessage::Start { port: settings.tcp_port, interval: settings.update_interval }.into_bytes(),
                         (address, settings.port),
                     ).await.unwrap();
 
@@ -229,12 +233,6 @@ async fn loop_iteration(
                         address.to_string().bright_green().bold(),
                         host.bright_blue().bold()
                     );
-                }
-            } else {
-                if let Some(info) = clients.get(&address) {
-                    println!("data from `{}`: {data:?}", info.host);
-                } else {
-                    println!("data from unknown host: {data:?}");
                 }
             }
         }
@@ -273,7 +271,7 @@ async fn main() -> std::io::Result<()> {
             loop_iteration(&args, &mut clients, &mut join_set, &socket, &mut listener).await;
 
         if let Some(force) = force {
-            let msg = ServerMessage::Quit { force }.to_bytes();
+            let msg = ServerMessage::Quit { force }.into_bytes();
             for (address, info) in clients {
                 println!("Closing connection to `{}`", info.host);
                 socket.send_to(&msg, (address, info.port)).await?;

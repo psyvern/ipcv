@@ -1030,6 +1030,7 @@ dependencies = [
 name = "ipcv"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "clap",
  "colored",
  "crossterm",

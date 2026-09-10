@@ -2,7 +2,7 @@ use clap::Parser;
 use colored::Colorize;
 use crossterm::event::{EventStream, KeyCode, KeyEvent, KeyModifiers};
 use futures::{FutureExt, StreamExt};
-use ipcv::{TermMode, is_closing_key};
+use ipcv::{ClientMessage, ServerMessage, TermMode, is_closing_key};
 use nokhwa::{
     CallbackCamera,
     utils::{CameraFormat, CameraIndex, FrameFormat, RequestedFormat, RequestedFormatType},
@@ -45,14 +45,22 @@ async fn wait_for_server(
     let input_socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, port)).await?;
     // input_socket.set_timeout(5);
 
-    let initial_message = format!(
-        "open {} {} {} {}",
-        camera_format.resolution().width(),
-        camera_format.resolution().height(),
-        camera_format.format(),
-        hostname::get()?.to_string_lossy()
-    )
-    .into_bytes();
+    let initial_message = {
+        let mut value = b"open ".to_vec();
+        value.extend(camera_format.resolution().width().to_be_bytes());
+        value.extend(camera_format.resolution().height().to_be_bytes());
+        value.push(match camera_format.format() {
+            FrameFormat::MJPEG => 0,
+            FrameFormat::YUYV => 1,
+            FrameFormat::NV12 => 2,
+            FrameFormat::GRAY => 3,
+            FrameFormat::RAWRGB => 4,
+            FrameFormat::RAWBGR => 5,
+        });
+        value.extend(hostname::get()?.to_string_lossy().bytes());
+
+        value
+    };
 
     let mut events = EventStream::new();
     let mut data = [0u8; 4096];
@@ -76,16 +84,10 @@ async fn wait_for_server(
 
             },
             Ok((size, address)) = input_socket.recv_from(&mut data) => {
-                let data = &data[..size];
                 let address = address.ip();
 
-                let string_data = String::from_utf8(data.to_vec()).unwrap();
-                if let Some(string_data) = string_data.strip_prefix("start ") {
-                    let (port, delay) = string_data.split_once('\0').unwrap();
-                    let port = port.parse().unwrap();
-                    let delay = Duration::from_secs_f64(delay.parse().unwrap());
-
-                    return Ok(Some((SocketAddr::new(address, port), delay)));
+                if let Some(ServerMessage::Start { port, interval }) = ServerMessage::from_bytes(&data[..size]) {
+                    return Ok(Some((SocketAddr::new(address, port), interval)));
                 }
             }
 
@@ -120,9 +122,7 @@ async fn client_thread(
                 if let Ok(frame) = frame {
                     let bytes = frame.buffer_bytes();
 
-                    let _ = output.write_all(&[0]).await;
-                    let _ = output.write_all(&(bytes.len() as u32).to_be_bytes()).await;
-                    let _ = output.write_all(&bytes).await;
+                    let _ = output.write_all(&ClientMessage::Frame(bytes).into_bytes()).await;
 
                     // socket.send(counter.to_string().into_bytes());
                     println!("Sending frame: {}", counter.to_string().bright_cyan().bold());
@@ -131,17 +131,17 @@ async fn client_thread(
             }
             _ = heartbeat.tick() => {
                 println!("Server did not heartbeat, detaching...");
-                let _ = output.write_all(&[1]).await;
+                let _ = output.write_all(&ClientMessage::Close.into_bytes()).await;
                 break true;
             }
             Some(Ok(crossterm::event::Event::Key(x))) = events.next().fuse() => {
                 match x {
                     KeyEvent { code: KeyCode::Char('q'), modifiers: KeyModifiers::NONE, .. } | KeyEvent { code: KeyCode::Char('Q'), modifiers: KeyModifiers::SHIFT, .. } => {
-                        output.write_all(&[1]).await?;
+                        output.write_all(&ClientMessage::Close.into_bytes()).await?;
                         break false;
                     },
                     x if is_closing_key(x) => {
-                        output.write_all(&[1]).await?;
+                        output.write_all(&ClientMessage::Close.into_bytes()).await?;
                         break false;
                     }
                     _ => {}
@@ -149,20 +149,24 @@ async fn client_thread(
 
             },
             Ok(_) = input.recv(&mut data) => {
-                heartbeat.reset();
-
-                let string_data = String::from_utf8(data.to_vec()).unwrap();
-
-                if let Some(string_data) = string_data.strip_prefix("quit ") {
-                    let force = string_data.starts_with("true");
-
-                    if force {
-                        println!("Server closed, closing...");
-                        break false;
-                    } else {
-                        println!("Server closed, detaching...");
-                        break true;
+                match ServerMessage::from_bytes(&data[..]) {
+                    Some(ServerMessage::Start { .. }) => {}
+                    Some(ServerMessage::Quit { force }) => {
+                        if force {
+                            println!("Server closed, closing...");
+                            break false;
+                        } else {
+                            println!("Server closed, detaching...");
+                            break true;
+                        }
                     }
+                    Some(ServerMessage::Heartbeat) => heartbeat.reset(),
+                    Some(ServerMessage::UpdateInterval(x)) => {
+                        interval = tokio::time::interval(x);
+                        heartbeat = tokio::time::interval(x * 10);
+                        heartbeat.tick().await;
+                    }
+                    None => {}
                 }
             }
         }
