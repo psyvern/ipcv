@@ -44,6 +44,9 @@ pub struct Args {
     /// Camera index
     #[arg(long, short, default_value_t = 0)]
     camera_index: u32,
+    /// Enable Graphical User Interface (GUI)
+    #[arg(long)]
+    gui: bool,
 }
 
 async fn wait_for_server(
@@ -270,10 +273,22 @@ pub async fn client_loop(
     result
 }
 
-fn main() -> iced::Result {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     println!("{args:?}");
-    ARGS.set(args).unwrap();
+    ARGS.set(args.clone()).unwrap();
 
-    gui::run()
+    if args.gui {
+        gui::run()?;
+    } else {
+        let rt = tokio::runtime::Runtime::new()?;
+        let (gui_output, mut rx) = futures::channel::mpsc::channel(100);
+        let (_gui_tx, gui_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        rt.spawn(async move { while rx.next().await.is_some() {} });
+
+        rt.block_on(client_loop(args, gui_output, gui_rx))?;
+    }
+
+    Ok(())
 }
