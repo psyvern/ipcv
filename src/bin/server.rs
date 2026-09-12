@@ -87,16 +87,16 @@ async fn connection_thread(
     token: CancellationToken,
     mut stream: TcpStream,
     socket: Arc<UdpSocket>,
-) {
+) -> std::io::Result<()> {
     let mut counter = 0;
 
     let mut reader = ClientMessageParser::default();
 
     let directory = settings.output.join(address.to_string());
     let _ = std::fs::remove_dir_all(&directory);
-    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::create_dir(&directory)?;
 
-    let mut log = File::create(directory.join("output.log")).unwrap();
+    let mut log = File::create(directory.join("output.log"))?;
 
     let mut packet = [0; 4096];
 
@@ -116,7 +116,7 @@ async fn connection_thread(
                 break;
             }
             _ = interval_2.tick() => {
-                socket.send_to(&ServerMessage::Heartbeat.into_bytes(), (address, settings.port)).await.unwrap();
+                let _ = socket.send_to(&ServerMessage::Heartbeat.into_bytes(), (address, settings.port)).await;
             }
             Ok(amount) = stream.read(&mut packet) => {
                 interval.reset();
@@ -124,7 +124,7 @@ async fn connection_thread(
 
                 match reader.read(&packet[..amount]) {
                     None => {},
-                    Some(ClientMessage::Close) => return,
+                    Some(ClientMessage::Close) => break,
                     Some(ClientMessage::Frame(bytes)) => {
                         let bytes = RgbFormat::write_output(format, Resolution::new(width, height), &bytes).unwrap();
                         let frame = ImageBuffer::<Rgb<u8>, _>::from_vec(width, height, bytes).unwrap();
@@ -135,12 +135,14 @@ async fn connection_thread(
                         println!("Received frame {} from {}", counter.to_string().bright_cyan().bold(), address.to_string().bright_green().bold());
                         counter += 1;
 
-                        writeln!(log, "[{:?}] ciaooo {counter:05}", Instant::now()).unwrap();
+                        writeln!(log, "[{:?}] ciaooo {counter:05}", Instant::now())?;
                     }
                 }
             }
         }
     }
+
+    Ok(())
 }
 
 async fn loop_iteration(
@@ -174,7 +176,6 @@ async fn loop_iteration(
         }
         Ok((size, address)) = data_socket.recv_from(&mut data) => {
             let address = address.ip();
-
             let data = &data[..size];
 
             if let Some(data) = data.strip_prefix(b"open ") {
@@ -214,7 +215,9 @@ async fn loop_iteration(
                         let socket = data_socket.clone();
 
                         join_set.spawn(async move {
-                            connection_thread(width, height, format, address, settings, token, stream, socket).await;
+                            if let Err(e) = connection_thread(width, height, format, address, settings, token, stream, socket).await {
+                                eprintln!("{e}");
+                            };
                             address
                         });
                     }
@@ -254,6 +257,8 @@ async fn loop_iteration(
 async fn main() -> std::io::Result<()> {
     let args = Args::parse();
     println!("{args:?}");
+
+    std::fs::create_dir_all(&args.output)?;
 
     let stdin = std::io::stdin();
     let old_term = TermMode::new(stdin.as_raw_fd())?;
