@@ -147,7 +147,7 @@ async fn connection_thread(
                             ImageBuffer::<Rgb<u8>, _>::from_vec(width, height, bytes).unwrap();
 
                         let (preview_width, preview_height, preview_rgba) = ipcv::generate_preview(&frame, 340);
-                        
+
                         let _ = output.send(gui::Message::ServerEvent(ServerEvent::FrameReceived {
                             address,
                             frame_number: counter as u64,
@@ -231,37 +231,35 @@ async fn loop_iteration(
                     return None;
                 }
 
-                if let Some(_info) = clients.get(&address) {
-                    data_socket.send_to(
-                        &ServerMessage::Start { port: settings.tcp_port, interval: settings.update_interval }.to_bytes(),
-                        (address, settings.port),
-                    ).await.unwrap();
+                if let Some(info) = clients.remove(&address) {
+                    println!("Removing old zombie connection for `{}`", address);
+                    info.token.cancel();
+                }
 
-                    println!("Reconnected to `{}`", address);
-                } else {
-                    let width = width.parse().unwrap();
-                    let height = height.parse().unwrap();
-                    let format = format.parse().unwrap();
+                let width = width.parse().unwrap();
+                let height = height.parse().unwrap();
+                let format = format.parse().unwrap();
 
-                    data_socket.send_to(
-                        &ServerMessage::Start { port: settings.tcp_port, interval: settings.update_interval }.to_bytes(),
-                        (address, settings.port),
-                    ).await.unwrap();
+                data_socket.send_to(
+                    &ServerMessage::Start { port: settings.tcp_port, interval: settings.update_interval }.to_bytes(),
+                    (address, settings.port),
+                ).await.unwrap();
 
-                    let token = CancellationToken::new();
+                let token = CancellationToken::new();
 
-                    {
-                        let settings = settings.clone();
-                        let token = token.clone();
-                        let (stream, _) = listener.accept().await.unwrap();
-                        let socket = data_socket.clone();
-                        let output_clone = output.clone();
+                // Wait up to 3 seconds for the client to establish the TCP connection
+                let accept_result = tokio::time::timeout(std::time::Duration::from_secs(3), listener.accept()).await;
 
-                        join_set.spawn(async move {
-                            connection_thread(width, height, format, address, settings, token, stream, socket, output_clone).await;
-                            address
-                        });
-                    }
+                if let Ok(Ok((stream, _))) = accept_result {
+                    let settings_clone = settings.clone();
+                    let token_clone = token.clone();
+                    let socket = data_socket.clone();
+                    let output_clone = output.clone();
+
+                    join_set.spawn(async move {
+                        connection_thread(width, height, format, address, settings_clone, token_clone, stream, socket, output_clone).await;
+                        address
+                    });
 
                     let _ = output.send(gui::Message::ServerEvent(ServerEvent::ClientConnected {
                         address,
@@ -282,6 +280,8 @@ async fn loop_iteration(
                         address.to_string().bright_green().bold(),
                         host.bright_blue().bold()
                     );
+                } else {
+                    println!("Client `{}` failed to connect via TCP.", host);
                 }
             } else {
                 if let Some(info) = clients.get(&address) {
