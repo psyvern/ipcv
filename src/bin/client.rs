@@ -262,42 +262,41 @@ pub async fn client_loop(
     let camera_format_arc = std::sync::Arc::new(std::sync::RwLock::new(None::<CameraFormat>));
     let camera_format_clone = camera_format_arc.clone();
 
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(1);
+
     // Clone the GUI sender so the background thread can send preview frames to the UI
     let mut gui_output_clone = gui_output.clone();
 
-    // The callback runs continuously in a background thread for every captured frame
-    let mut camera = CallbackCamera::new(index, format, move |buffer| {
-        let fmt = *camera_format_clone.read().unwrap();
+    // Spawn a dedicated thread for processing the live preview to avoid blocking the camera thread
+    std::thread::spawn(move || {
+        while let Ok(bytes) = rx.recv() {
+            let fmt = *camera_format_clone.read().unwrap();
+            
+            if let Some(fmt) = fmt {
+                let width = fmt.resolution().width();
+                let height = fmt.resolution().height();
+                let frame_format = fmt.format();
 
-        // Only process frames if the camera format has been successfully populated
-        if let Some(fmt) = fmt {
-            let width = fmt.resolution().width();
-            let height = fmt.resolution().height();
-            let frame_format = fmt.format();
-
-            // Extract the raw byte buffer from the camera
-            let bytes = buffer.buffer_bytes();
-
-            // Decode the raw bytes into a contiguous RGB byte array
-            if let Ok(rgb_bytes) = nokhwa::pixel_format::RgbFormat::write_output(
-                frame_format,
-                fmt.resolution(),
-                &bytes,
-            ) {
-                // Construct an ImageBuffer to manipulate the frame
-                if let Some(frame) =
-                    image::ImageBuffer::<image::Rgb<u8>, _>::from_vec(width, height, rgb_bytes)
-                {
-                    // Generate a lightweight, downscaled preview to save GUI memory and rendering time
-                    let (p_width, p_height, p_rgba) = ipcv::generate_preview(&frame, 340);
-
-                    // Send the preview to the GUI using try_send to avoid blocking the camera thread
-                    let _ = gui_output_clone.try_send(gui::Message::ClientEvent(
-                        gui::ClientEvent::PreviewFrame(p_width, p_height, p_rgba),
-                    ));
+                if let Ok(rgb_bytes) = nokhwa::pixel_format::RgbFormat::write_output(
+                    frame_format,
+                    fmt.resolution(),
+                    &bytes,
+                ) {
+                    if let Some(frame) = image::ImageBuffer::<image::Rgb<u8>, _>::from_vec(width, height, rgb_bytes) {
+                        let (p_width, p_height, p_rgba) = ipcv::generate_preview(&frame, 340);
+                        let _ = gui_output_clone.try_send(gui::Message::ClientEvent(
+                            gui::ClientEvent::PreviewFrame(p_width, p_height, p_rgba),
+                        ));
+                    }
                 }
             }
         }
+    });
+
+    // The callback runs continuously in a background thread for every captured frame
+    let mut camera = CallbackCamera::new(index, format, move |buffer| {
+        // Try to send the buffer to the worker thread. Drops the frame if the worker is busy.
+        let _ = tx.try_send(buffer.buffer_bytes().to_vec());
     })
     .unwrap();
 
