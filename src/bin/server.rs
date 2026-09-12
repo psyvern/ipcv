@@ -25,7 +25,7 @@ use tokio::task::JoinSet;
 use tokio::{net::UdpSocket, select};
 use tokio_util::sync::CancellationToken;
 
-#[path = "../gui.rs"]
+#[path = "../server_gui.rs"]
 pub mod gui;
 use ipcv::{GuiCommand, ServerEvent};
 
@@ -172,10 +172,27 @@ async fn loop_iteration(
     listener: &mut TcpListener,
     output: &mut futures::channel::mpsc::Sender<gui::Message>,
     key_rx: &mut tokio::sync::mpsc::UnboundedReceiver<crossterm::event::KeyEvent>,
+    gui_rx: &mut tokio::sync::mpsc::UnboundedReceiver<GuiCommand>,
 ) -> Option<bool> {
     let mut data = [0u8; 4096];
 
     select! {
+        Some(cmd) = gui_rx.recv() => {
+            match cmd {
+                GuiCommand::DisconnectClient(address) => {
+                    if let Some(info) = clients.remove(&address) {
+                        println!("Closing connection to `{}` via GUI", info.host);
+                        let msg = ServerMessage::Quit { force: false }.to_bytes();
+                        let _ = data_socket.send_to(&msg, (address, info.port)).await;
+                        info.token.cancel();
+                    }
+                }
+                GuiCommand::Disconnect => {} // Used by client
+                GuiCommand::Shutdown { force } => {
+                    return Some(force);
+                }
+            }
+        }
         Some(x) = key_rx.recv() => {
             match x {
                 KeyEvent { code: KeyCode::Char('h'), modifiers: KeyModifiers::NONE, .. } => {
@@ -279,6 +296,7 @@ async fn loop_iteration(
 pub async fn server_loop(
     args: Args,
     mut output: futures::channel::mpsc::Sender<gui::Message>,
+    mut gui_rx: tokio::sync::mpsc::UnboundedReceiver<GuiCommand>,
 ) -> std::io::Result<()> {
     let old_term = if args.tui {
         Some(TermMode::new()?)
@@ -322,6 +340,7 @@ pub async fn server_loop(
             &mut listener,
             &mut output,
             &mut key_rx,
+            &mut gui_rx,
         )
         .await;
 
@@ -341,8 +360,10 @@ pub async fn server_loop(
     if let Some(term) = old_term {
         drop(term);
     }
-    
-    let _ = output.send(gui::Message::ServerEvent(ServerEvent::Stopped)).await;
+
+    let _ = output
+        .send(gui::Message::ServerEvent(ServerEvent::Stopped))
+        .await;
     Ok(())
 }
 

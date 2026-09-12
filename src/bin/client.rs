@@ -2,7 +2,7 @@ use clap::Parser;
 use colored::Colorize;
 use crossterm::event::{EventStream, KeyCode, KeyEvent, KeyModifiers};
 use futures::{FutureExt, StreamExt};
-use ipcv::{TermMode, is_closing_key};
+use ipcv::{GuiCommand, TermMode, is_closing_key};
 use nokhwa::{
     CallbackCamera,
     utils::{CameraFormat, CameraIndex, FrameFormat, RequestedFormat, RequestedFormatType},
@@ -18,10 +18,17 @@ use tokio::{
     select,
 };
 
+use futures::SinkExt;
+
+#[path = "../client_gui.rs"]
+pub mod gui;
+
+pub static ARGS: std::sync::OnceLock<Args> = std::sync::OnceLock::new();
+
 const MCAST_GRP: &str = "224.1.1.1";
 
 #[derive(Debug, Clone, Parser)]
-struct Args {
+pub struct Args {
     /// Communication port (must be the same in the server)
     #[arg(long, short, default_value_t = 5007)]
     port: u16,
@@ -108,9 +115,11 @@ async fn client_thread(
     ip: Ipv4Addr,
     address: SocketAddr,
     time: Duration,
+    gui_output: &mut futures::channel::mpsc::Sender<gui::Message>,
+    gui_rx: &mut tokio::sync::mpsc::UnboundedReceiver<GuiCommand>,
 ) -> std::io::Result<bool> {
     let input = UdpSocket::bind((ip, port)).await?;
-    
+
     let socket = TcpSocket::new_v4()?;
     socket.bind(SocketAddr::new(std::net::IpAddr::V4(ip), 0))?;
     let mut output = socket.connect(address).await.unwrap();
@@ -125,6 +134,16 @@ async fn client_thread(
 
     Ok(loop {
         select! {
+            Some(cmd) = gui_rx.recv() => {
+                match cmd {
+                    GuiCommand::Disconnect | GuiCommand::Shutdown { .. } => {
+                        println!("Disconnecting via GUI command...");
+                        output.write_all(&[1]).await?;
+                        break false;
+                    }
+                    _ => {} // Other commands like DisconnectClient don't apply to the client
+                }
+            }
             _ = interval.tick() => {
                 let frame = camera.last_frame();
                 if let Ok(frame) = frame {
@@ -136,6 +155,7 @@ async fn client_thread(
 
                     // socket.send(counter.to_string().into_bytes());
                     println!("Sending frame: {}", counter.to_string().bright_cyan().bold());
+                    let _ = gui_output.send(gui::Message::ClientEvent(gui::ClientEvent::FrameSent { count: counter })).await;
                     counter += 1;
                 }
             }
@@ -179,7 +199,12 @@ async fn client_thread(
     })
 }
 
-async fn run(args: Args, camera: &mut CallbackCamera) -> std::io::Result<()> {
+async fn run(
+    args: Args,
+    camera: &mut CallbackCamera,
+    gui_output: &mut futures::channel::mpsc::Sender<gui::Message>,
+    gui_rx: &mut tokio::sync::mpsc::UnboundedReceiver<GuiCommand>,
+) -> std::io::Result<()> {
     let camera_format = camera.camera_format().unwrap();
     println!(
         "Using camera: {}",
@@ -187,13 +212,22 @@ async fn run(args: Args, camera: &mut CallbackCamera) -> std::io::Result<()> {
     );
 
     loop {
-        let Some((address, delay)) = wait_for_server(args.port, args.ip, camera_format).await? else {
+        let Some((address, delay)) = wait_for_server(args.port, args.ip, camera_format).await?
+        else {
             break;
         };
 
         println!("Connected to {}", address.to_string().bright_green().bold());
+        let _ = gui_output
+            .send(gui::Message::ClientEvent(gui::ClientEvent::Connected {
+                server: address.to_string(),
+            }))
+            .await;
 
-        let retry = client_thread(camera, args.port, args.ip, address, delay).await?;
+        let retry = client_thread(
+            camera, args.port, args.ip, address, delay, gui_output, gui_rx,
+        )
+        .await?;
 
         if !retry {
             break;
@@ -203,11 +237,11 @@ async fn run(args: Args, camera: &mut CallbackCamera) -> std::io::Result<()> {
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> std::io::Result<()> {
-    let args = Args::parse();
-    println!("{args:?}");
-
+pub async fn client_loop(
+    args: Args,
+    mut gui_output: futures::channel::mpsc::Sender<gui::Message>,
+    mut gui_rx: tokio::sync::mpsc::UnboundedReceiver<GuiCommand>,
+) -> std::io::Result<()> {
     let old_term = TermMode::new()?;
 
     let index = CameraIndex::Index(args.camera_index);
@@ -224,10 +258,22 @@ async fn main() -> std::io::Result<()> {
     camera.open_stream().unwrap();
     camera.poll_frame().unwrap();
 
-    let result = run(args, &mut camera).await;
+    let result = run(args, &mut camera, &mut gui_output, &mut gui_rx).await;
 
     camera.stop_stream().unwrap();
     drop(old_term);
 
+    let _ = gui_output
+        .send(gui::Message::ClientEvent(gui::ClientEvent::Stopped))
+        .await;
+
     result
+}
+
+fn main() -> iced::Result {
+    let args = Args::parse();
+    println!("{args:?}");
+    ARGS.set(args).unwrap();
+
+    gui::run()
 }

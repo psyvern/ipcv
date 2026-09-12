@@ -135,7 +135,10 @@ use std::sync::Arc;
 pub enum ServerEvent {
     Started,
     Stopped,
-    ClientConnected { address: IpAddr, host: String },
+    ClientConnected {
+        address: IpAddr,
+        host: String,
+    },
     HeartbeatTick,
     FrameReceived {
         address: IpAddr,
@@ -147,6 +150,7 @@ pub enum ServerEvent {
 
 #[derive(Debug, Clone)]
 pub enum GuiCommand {
+    Disconnect,
     DisconnectClient(IpAddr),
     Shutdown { force: bool },
 }
