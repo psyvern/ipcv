@@ -22,6 +22,7 @@ struct ClientState {
 struct State {
     server_status: String,
     clients: HashMap<IpAddr, ClientState>,
+    waiting_clients: HashMap<IpAddr, String>,
     gui_tx: Option<tokio::sync::mpsc::UnboundedSender<GuiCommand>>,
 }
 
@@ -62,17 +63,13 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                 ServerEvent::FrameReceived {
                     address,
                     frame_number,
-                    frame,
+                    preview_width,
+                    preview_height,
+                    preview_rgba,
                 } => {
                     state.server_status = format!("Frame {} from {}", frame_number, address);
 
-                    let width = frame.width();
-                    let height = frame.height();
-                    let mut rgba = Vec::with_capacity((width * height * 4) as usize);
-                    for pixel in frame.pixels() {
-                        rgba.extend_from_slice(&[pixel[0], pixel[1], pixel[2], 255]);
-                    }
-                    let handle = iced::widget::image::Handle::from_rgba(width, height, rgba);
+                    let handle = iced::widget::image::Handle::from_rgba(preview_width, preview_height, preview_rgba);
 
                     let client = state.clients.entry(address).or_insert_with(|| ClientState {
                         host: "Unknown".to_string(),
@@ -93,8 +90,16 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             if let Some(tx) = &state.gui_tx {
                 let _ = tx.send(cmd.clone());
             }
-            if let GuiCommand::DisconnectClient(address) = cmd {
-                state.clients.remove(&address);
+            match cmd {
+                GuiCommand::DisconnectClient(address) => {
+                    if let Some(client) = state.clients.remove(&address) {
+                        state.waiting_clients.insert(address, client.host);
+                    }
+                }
+                GuiCommand::AcceptClient(address) => {
+                    state.waiting_clients.remove(&address);
+                }
+                _ => {}
             }
             Task::none()
         }
@@ -102,12 +107,25 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
 }
 
 fn view(state: &State) -> Element<'_, Message> {
-    let header = column![
+    let mut header = column![
         text("IPCV Server GUI").size(40),
         text("Status:").size(20),
         text(&state.server_status).size(16),
     ]
     .spacing(20);
+
+    if !state.waiting_clients.is_empty() {
+        let mut waiting_col = column![text("Waiting Clients:").size(20)].spacing(10);
+        for (address, host) in &state.waiting_clients {
+            waiting_col = waiting_col.push(
+                row![
+                    text(format!("{} ({})", host, address)).size(16),
+                    button("Accept").on_press(Message::SendCommand(GuiCommand::AcceptClient(*address)))
+                ].spacing(10)
+            );
+        }
+        header = header.push(waiting_col);
+    }
 
     let mut clients_row = row![].spacing(20);
 
@@ -120,10 +138,8 @@ fn view(state: &State) -> Element<'_, Message> {
         } else {
             client_col = client_col.push(
                 container(text("No Preview").size(16))
-                    .width(iced::Length::Fixed(340.0))
-                    .height(iced::Length::Fixed(255.0))
-                    .center_x(iced::Length::Fill)
-                    .center_y(iced::Length::Fill),
+                    .center_x(340.0)
+                    .center_y(255.0),
             );
         }
 
@@ -142,9 +158,10 @@ fn view(state: &State) -> Element<'_, Message> {
         clients_row = clients_row.push(container(client_col).padding(10));
     }
 
-    let scrollable_clients = scrollable(clients_row).direction(scrollable::Direction::Horizontal(
-        scrollable::Scrollbar::new(),
-    ));
+    let scrollable_clients = iced::widget::Scrollable::with_direction(
+        clients_row,
+        scrollable::Direction::Horizontal(scrollable::Scrollbar::new()),
+    );
 
     let content = column![header, scrollable_clients].spacing(40);
 

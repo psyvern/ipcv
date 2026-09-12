@@ -4,7 +4,7 @@ use crossterm::event::{EventStream, KeyCode, KeyEvent, KeyModifiers};
 use futures::{FutureExt, StreamExt};
 use ipcv::{GuiCommand, TermMode, is_closing_key};
 use nokhwa::{
-    CallbackCamera,
+    CallbackCamera, FormatDecoder,
     utils::{CameraFormat, CameraIndex, FrameFormat, RequestedFormat, RequestedFormatType},
 };
 use std::{
@@ -14,7 +14,7 @@ use std::{
 
 use tokio::{
     io::AsyncWriteExt,
-    net::{TcpSocket, TcpStream, UdpSocket},
+    net::{TcpSocket, UdpSocket},
     select,
 };
 
@@ -257,9 +257,57 @@ pub async fn client_loop(
             FrameFormat::MJPEG,
         ],
     );
-    let mut camera = CallbackCamera::new(index, format, |_| {}).unwrap();
+    // Arc<RwLock> to pass the camera format into the background callback thread.
+    // The format is only available after the camera stream is opened, therefore initialize it with None.
+    let camera_format_arc = std::sync::Arc::new(std::sync::RwLock::new(None::<CameraFormat>));
+    let camera_format_clone = camera_format_arc.clone();
+
+    // Clone the GUI sender so the background thread can send preview frames to the UI
+    let mut gui_output_clone = gui_output.clone();
+
+    // The callback runs continuously in a background thread for every captured frame
+    let mut camera = CallbackCamera::new(index, format, move |buffer| {
+        let fmt = *camera_format_clone.read().unwrap();
+
+        // Only process frames if the camera format has been successfully populated
+        if let Some(fmt) = fmt {
+            let width = fmt.resolution().width();
+            let height = fmt.resolution().height();
+            let frame_format = fmt.format();
+
+            // Extract the raw byte buffer from the camera
+            let bytes = buffer.buffer_bytes();
+
+            // Decode the raw bytes into a contiguous RGB byte array
+            if let Ok(rgb_bytes) = nokhwa::pixel_format::RgbFormat::write_output(
+                frame_format,
+                fmt.resolution(),
+                &bytes,
+            ) {
+                // Construct an ImageBuffer to manipulate the frame
+                if let Some(frame) =
+                    image::ImageBuffer::<image::Rgb<u8>, _>::from_vec(width, height, rgb_bytes)
+                {
+                    // Generate a lightweight, downscaled preview to save GUI memory and rendering time
+                    let (p_width, p_height, p_rgba) = ipcv::generate_preview(&frame, 340);
+
+                    // Send the preview to the GUI using try_send to avoid blocking the camera thread
+                    let _ = gui_output_clone.try_send(gui::Message::ClientEvent(
+                        gui::ClientEvent::PreviewFrame(p_width, p_height, p_rgba),
+                    ));
+                }
+            }
+        }
+    })
+    .unwrap();
+
+    // Start the camera stream
     camera.open_stream().unwrap();
     camera.poll_frame().unwrap();
+
+    // Now that the stream is open, we can fetch the actual camera format and share it with the callback thread
+    let camera_format = camera.camera_format().unwrap();
+    *camera_format_arc.write().unwrap() = Some(camera_format);
 
     let result = run(args, &mut camera, &mut gui_output, &mut gui_rx).await;
 

@@ -146,11 +146,14 @@ async fn connection_thread(
                         let frame =
                             ImageBuffer::<Rgb<u8>, _>::from_vec(width, height, bytes).unwrap();
 
-                        let frame_arc = Arc::new(frame);
+                        let (preview_width, preview_height, preview_rgba) = ipcv::generate_preview(&frame, 340);
+                        
                         let _ = output.send(gui::Message::ServerEvent(ServerEvent::FrameReceived {
                             address,
                             frame_number: counter as u64,
-                            frame: frame_arc,
+                            preview_width,
+                            preview_height,
+                            preview_rgba,
                         })).await;
 
                         println!("Received frame {} from {}", counter.to_string().bright_cyan().bold(), address.to_string().bright_green().bold());
@@ -173,6 +176,7 @@ async fn loop_iteration(
     output: &mut futures::channel::mpsc::Sender<gui::Message>,
     key_rx: &mut tokio::sync::mpsc::UnboundedReceiver<crossterm::event::KeyEvent>,
     gui_rx: &mut tokio::sync::mpsc::UnboundedReceiver<GuiCommand>,
+    waiting_clients: &mut HashMap<IpAddr, String>,
 ) -> Option<bool> {
     let mut data = [0u8; 4096];
 
@@ -185,7 +189,11 @@ async fn loop_iteration(
                         let msg = ServerMessage::Quit { force: false }.to_bytes();
                         let _ = data_socket.send_to(&msg, (address, info.port)).await;
                         info.token.cancel();
+                        waiting_clients.insert(address, info.host.clone());
                     }
+                }
+                GuiCommand::AcceptClient(address) => {
+                    waiting_clients.remove(&address);
                 }
                 GuiCommand::Disconnect => {} // Used by client
                 GuiCommand::Shutdown { force } => {
@@ -218,6 +226,10 @@ async fn loop_iteration(
             if let Some(data) = data.strip_prefix(b"open ") {
                 let data = String::from_utf8(data.to_vec()).unwrap();
                 let (width, height, format, host) = data.splitn(4, " ").next_tuple().unwrap();
+
+                if waiting_clients.contains_key(&address) {
+                    return None;
+                }
 
                 if let Some(_info) = clients.get(&address) {
                     data_socket.send_to(
@@ -308,6 +320,7 @@ pub async fn server_loop(
     socket.join_multicast_v4(MCAST_GRP.parse().unwrap(), args.ip)?;
 
     let mut clients = HashMap::new();
+    let mut waiting_clients = HashMap::new();
     let mut join_set = JoinSet::new();
     let mut listener = TcpListener::bind((args.ip, args.tcp_port)).await?;
 
@@ -341,6 +354,7 @@ pub async fn server_loop(
             &mut output,
             &mut key_rx,
             &mut gui_rx,
+            &mut waiting_clients,
         )
         .await;
 

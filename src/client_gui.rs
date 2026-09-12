@@ -11,6 +11,7 @@ pub enum ClientEvent {
     Disconnected,
     FrameSent { count: u64 },
     Log(String),
+    PreviewFrame(u32, u32, Vec<u8>),
 }
 
 pub fn run() -> iced::Result {
@@ -24,6 +25,7 @@ pub fn run() -> iced::Result {
 struct State {
     status: String,
     gui_tx: Option<tokio::sync::mpsc::UnboundedSender<GuiCommand>>,
+    preview_frame: Option<iced::widget::image::Handle>,
 }
 
 #[derive(Debug, Clone)]
@@ -55,6 +57,9 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                 ClientEvent::Log(msg) => {
                     state.status = format!("Log: {}", msg);
                 }
+                ClientEvent::PreviewFrame(width, height, rgba) => {
+                    state.preview_frame = Some(iced::widget::image::Handle::from_rgba(width, height, rgba));
+                }
             }
             Task::none()
         }
@@ -72,13 +77,24 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
 }
 
 fn view(state: &State) -> Element<'_, Message> {
-    let content = column![
+    let mut content = column![
         text("IPCV Client GUI").size(40),
         text("Status:").size(20),
         text(&state.status).size(16),
-        button("Disconnect").on_press(Message::SendCommand(GuiCommand::Disconnect)),
     ]
     .spacing(20);
+
+    if let Some(handle) = &state.preview_frame {
+        content = content.push(iced::widget::image(handle.clone()).width(iced::Length::Fixed(340.0)));
+    } else {
+        content = content.push(
+            container(text("No Preview").size(16))
+                .center_x(340.0)
+                .center_y(255.0),
+        );
+    }
+
+    content = content.push(button("Disconnect").on_press(Message::SendCommand(GuiCommand::Disconnect)));
 
     container(content)
         .center_x(iced::Length::Fill)
