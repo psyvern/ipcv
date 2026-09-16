@@ -1,4 +1,4 @@
-use std::{os::fd::RawFd, time::Duration};
+use std::{io::Stdin, time::Duration};
 
 use bytes::Bytes;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -17,24 +17,19 @@ pub fn is_closing_key(event: KeyEvent) -> bool {
 
 cfg_select! {
     unix => {
+        use std::os::fd::{AsRawFd, RawFd};
+
         pub struct TermMode {
             fd: RawFd,
             original: termios::Termios,
         }
-    }
-    _ => {
-        pub struct TermMode;
-    }
-}
 
-impl TermMode {
-    pub fn new(fd: RawFd) -> std::io::Result<Self> {
-        cfg_select! {
-            unix => {
-                let mut original = termios::Termios::from_fd(0)?;
-                termios::tcgetattr(fd, &mut original)?;
+        impl TermMode {
+            pub fn new(stdin: Stdin) -> std::io::Result<Self> {
+                let fd = stdin.as_raw_fd();
+                let original = termios::Termios::from_fd(0)?;
 
-                let mut new = original.clone();
+                let mut new = original;
                 termios::cfmakeraw(&mut new);
                 new.c_oflag |= termios::OPOST;
 
@@ -42,19 +37,22 @@ impl TermMode {
 
                 Ok(Self { fd, original })
             }
-            _ => Ok(Self),
         }
-    }
-}
 
-impl Drop for TermMode {
-    fn drop(&mut self) {
-        cfg_select! {
-            unix => {
+        impl Drop for TermMode {
+            fn drop(&mut self) {
                 termios::tcsetattr(self.fd, termios::TCSAFLUSH, &self.original)
                     .expect("Can't restore term mode");
             }
-            _ => {}
+        }
+    }
+    _ => {
+        pub struct TermMode;
+
+        impl TermMode {
+            pub fn new(_: Stdin) -> std::io::Result<Self> {
+                Ok(Self)
+            }
         }
     }
 }

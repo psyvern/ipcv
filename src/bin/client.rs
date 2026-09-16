@@ -9,7 +9,6 @@ use nokhwa::{
 };
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    os::fd::AsRawFd,
     time::Duration,
 };
 
@@ -213,7 +212,7 @@ async fn main() -> std::io::Result<()> {
     println!("{args:?}");
 
     let stdin = std::io::stdin();
-    let old_term = TermMode::new(stdin.as_raw_fd())?;
+    let old_term = TermMode::new(stdin)?;
 
     let index = CameraIndex::Index(0);
     let format = RequestedFormat::with_formats(
