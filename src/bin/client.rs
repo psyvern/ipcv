@@ -8,7 +8,7 @@ use nokhwa::{
     utils::{CameraFormat, CameraIndex, FrameFormat, RequestedFormat, RequestedFormatType},
 };
 use std::{
-    net::{Ipv4Addr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     os::fd::AsRawFd,
     time::Duration,
 };
@@ -19,13 +19,17 @@ use tokio::{
     select,
 };
 
-const MCAST_GRP: &str = "224.1.1.1";
-
 #[derive(Debug, Clone, Parser)]
 struct Args {
+    /// Multicast group to connect to
+    #[arg(long, short, default_value = "224.1.1.1")]
+    group: IpAddr,
     /// Communication port (must be the same in the server)
     #[arg(long, short, default_value_t = 5007)]
     port: u16,
+    /// Listening port
+    #[arg(long, short)]
+    listening_port: Option<u16>,
     /// Delay between sending (in seconds)
     #[arg(long, short, default_value_t = 5.0)]
     update_delay: f64,
@@ -35,18 +39,21 @@ struct Args {
 }
 
 async fn wait_for_server(
+    group: IpAddr,
     port: u16,
+    listening_port: u16,
     camera_format: CameraFormat,
 ) -> std::io::Result<Option<(SocketAddr, Duration)>> {
     let output = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
     output.set_ttl(2)?;
-    output.connect((MCAST_GRP, port)).await?;
+    output.connect((group, port)).await?;
 
-    let input_socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, port)).await?;
+    let input_socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, listening_port)).await?;
     // input_socket.set_timeout(5);
 
     let initial_message = {
         let mut value = b"open ".to_vec();
+        value.extend(listening_port.to_be_bytes());
         value.extend(camera_format.resolution().width().to_be_bytes());
         value.extend(camera_format.resolution().height().to_be_bytes());
         value.push(match camera_format.format() {
@@ -146,7 +153,6 @@ async fn client_thread(
                     }
                     _ => {}
                 }
-
             },
             Ok(_) = input.recv(&mut data) => {
                 match ServerMessage::from_bytes(&data[..]) {
@@ -180,14 +186,18 @@ async fn run(args: Args, camera: &mut CallbackCamera) -> std::io::Result<()> {
         camera.info().human_name().yellow().bold()
     );
 
+    let listening_port = args.listening_port.unwrap_or(args.port);
+
     loop {
-        let Some((address, delay)) = wait_for_server(args.port, camera_format).await? else {
+        let Some((address, delay)) =
+            wait_for_server(args.group, args.port, listening_port, camera_format).await?
+        else {
             break;
         };
 
         println!("Connected to {}", address.to_string().bright_green().bold());
 
-        let retry = client_thread(camera, args.port, address, delay).await?;
+        let retry = client_thread(camera, listening_port, address, delay).await?;
 
         if !retry {
             break;

@@ -24,10 +24,11 @@ use tokio::task::JoinSet;
 use tokio::{net::UdpSocket, select};
 use tokio_util::sync::CancellationToken;
 
-const MCAST_GRP: &str = "224.1.1.1";
-
 #[derive(Debug, Clone, Parser)]
 struct Args {
+    /// Multicast group to join
+    #[arg(long, short, default_value = "224.1.1.1")]
+    group: IpAddr,
     /// Communication port (must be the same in clients)
     #[arg(long, short, default_value_t = 5007)]
     port: u16,
@@ -83,6 +84,7 @@ async fn connection_thread(
     height: u32,
     format: FrameFormat,
     address: IpAddr,
+    port: u16,
     settings: Args,
     token: CancellationToken,
     mut stream: TcpStream,
@@ -116,7 +118,7 @@ async fn connection_thread(
                 break;
             }
             _ = interval_2.tick() => {
-                let _ = socket.send_to(&ServerMessage::Heartbeat.into_bytes(), (address, settings.port)).await;
+                let _ = socket.send_to(&ServerMessage::Heartbeat.into_bytes(), (address, port)).await;
             }
             Ok(amount) = stream.read(&mut packet) => {
                 interval.reset();
@@ -180,6 +182,7 @@ async fn loop_iteration(
 
             if let Some(data) = data.strip_prefix(b"open ") {
                 let mut data = data.iter().copied();
+                let port = u16::from_be_bytes(data.next_array().unwrap());
                 let width = u32::from_be_bytes(data.next_array().unwrap());
                 let height = u32::from_be_bytes(data.next_array().unwrap());
                 let format = match data.next().unwrap() {
@@ -196,14 +199,14 @@ async fn loop_iteration(
                 if let Some(info) = clients.get(&address) {
                     data_socket.send_to(
                         &ServerMessage::Start { port: settings.tcp_port, interval: settings.update_interval }.into_bytes(),
-                        (address, settings.port),
+                        (address, port),
                     ).await.unwrap();
 
                     println!("Reconnected to `{}`", address);
                 } else {
                     data_socket.send_to(
                         &ServerMessage::Start { port: settings.tcp_port, interval: settings.update_interval }.into_bytes(),
-                        (address, settings.port),
+                        (address, port),
                     ).await.unwrap();
 
                     let token = CancellationToken::new();
@@ -215,27 +218,28 @@ async fn loop_iteration(
                         let socket = data_socket.clone();
 
                         join_set.spawn(async move {
-                            if let Err(e) = connection_thread(width, height, format, address, settings, token, stream, socket).await {
+                            if let Err(e) = connection_thread(width, height, format, address, port, settings, token, stream, socket).await {
                                 eprintln!("{e}");
                             };
                             address
                         });
-                    }
 
-                    let info = ClientInfo {
-                        host: host.to_owned(),
-                        port: settings.port,
-                        width,
-                        height,
-                        token,
-                    };
-                    clients.insert(address, info);
+                    }
 
                     println!(
                         "Added address {} as host {}",
                         address.to_string().bright_green().bold(),
                         host.bright_blue().bold()
                     );
+
+                    let info = ClientInfo {
+                        host,
+                        port,
+                        width,
+                        height,
+                        token,
+                    };
+                    clients.insert(address, info);
                 }
             }
         }
@@ -264,8 +268,10 @@ async fn main() -> std::io::Result<()> {
     let old_term = TermMode::new(stdin.as_raw_fd())?;
 
     let socket = Arc::new(UdpSocket::bind((Ipv4Addr::UNSPECIFIED, args.port)).await?);
-    // socket.reuse_address(true);
-    socket.join_multicast_v4(MCAST_GRP.parse().unwrap(), Ipv4Addr::UNSPECIFIED)?;
+    match args.group {
+        IpAddr::V4(address) => socket.join_multicast_v4(address, Ipv4Addr::UNSPECIFIED),
+        IpAddr::V6(address) => socket.join_multicast_v6(&address, 0),
+    }?;
 
     let mut clients = HashMap::new();
     let mut join_set = JoinSet::new();
