@@ -198,14 +198,14 @@ async fn loop_iteration(
 
                 if let Some(info) = clients.get(&address) {
                     data_socket.send_to(
-                        &ServerMessage::Start { port: settings.tcp_port, interval: settings.update_interval }.into_bytes(),
+                        &ServerMessage::Open { port: settings.tcp_port, interval: settings.update_interval }.into_bytes(),
                         (address, port),
                     ).await.unwrap();
 
                     println!("Reconnected to `{}`", address);
                 } else {
                     data_socket.send_to(
-                        &ServerMessage::Start { port: settings.tcp_port, interval: settings.update_interval }.into_bytes(),
+                        &ServerMessage::Open { port: settings.tcp_port, interval: settings.update_interval }.into_bytes(),
                         (address, port),
                     ).await.unwrap();
 
@@ -267,7 +267,7 @@ async fn main() -> std::io::Result<()> {
     let stdin = std::io::stdin();
     let old_term = TermMode::new(stdin)?;
 
-    let socket = Arc::new(UdpSocket::bind((Ipv4Addr::UNSPECIFIED, args.port)).await?);
+    let socket = Arc::new(UdpSocket::bind((ipcv::unspecified_from(args.group), args.port)).await?);
     match args.group {
         IpAddr::V4(address) => socket.join_multicast_v4(address, Ipv4Addr::UNSPECIFIED),
         IpAddr::V6(address) => socket.join_multicast_v6(&address, 0),
@@ -275,14 +275,15 @@ async fn main() -> std::io::Result<()> {
 
     let mut clients = HashMap::new();
     let mut join_set = JoinSet::new();
-    let mut listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, args.tcp_port)).await?;
+    let mut listener =
+        TcpListener::bind((ipcv::unspecified_from(args.group), args.tcp_port)).await?;
 
     loop {
         let force =
             loop_iteration(&args, &mut clients, &mut join_set, &socket, &mut listener).await;
 
         if let Some(force) = force {
-            let msg = ServerMessage::Quit { force }.into_bytes();
+            let msg = ServerMessage::Close { force }.into_bytes();
             for (address, info) in clients {
                 println!("Closing connection to `{}`", info.host);
                 socket.send_to(&msg, (address, info.port)).await?;

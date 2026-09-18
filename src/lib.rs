@@ -1,4 +1,8 @@
-use std::{io::Stdin, time::Duration};
+use std::{
+    io::Stdin,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    time::Duration,
+};
 
 use bytes::Bytes;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -61,14 +65,14 @@ cfg_select! {
 #[derive(Debug)]
 pub enum ServerMessage {
     /// Open the TCP connection
-    Start {
+    Open {
         /// The port of the TCP socket
         port: u16,
         /// How often to send frame updates
         interval: Duration,
     },
     /// Close the connection
-    Quit {
+    Close {
         /// Whether to also quit the client program
         force: bool,
     },
@@ -81,14 +85,14 @@ pub enum ServerMessage {
 impl ServerMessage {
     pub fn into_bytes(self) -> Vec<u8> {
         match self {
-            Self::Start { port, interval } => {
+            Self::Open { port, interval } => {
                 let mut result = vec![0];
                 result.extend(port.to_be_bytes());
                 result.extend(interval.as_secs_f64().to_be_bytes());
 
                 result
             }
-            Self::Quit { force } => vec![1, force as u8],
+            Self::Close { force } => vec![1, force as u8],
             Self::Heartbeat => vec![2],
             Self::UpdateInterval(interval) => {
                 let mut result = vec![3];
@@ -106,11 +110,11 @@ impl ServerMessage {
                 let port = u16::from_be_bytes(data.next_array()?);
                 let interval = Duration::from_secs_f64(f64::from_be_bytes(data.next_array()?));
 
-                Self::Start { port, interval }
+                Self::Open { port, interval }
             }
             1 => {
                 let force = data.next()? != 0;
-                Self::Quit { force }
+                Self::Close { force }
             }
             2 => Self::Heartbeat,
             3 => {
@@ -122,7 +126,7 @@ impl ServerMessage {
     }
 }
 
-/// A message sent from the server to the client
+/// A message sent from the client to the server
 pub enum ClientMessage {
     Frame(Bytes),
     Close,
@@ -170,5 +174,15 @@ impl ClientMessageParser {
         };
 
         Some(result)
+    }
+}
+
+/// Returns the unspecified IP address for the same IP version.
+///
+/// Returns `0.0.0.0` for IPv4 and `::` for IPv6.
+pub fn unspecified_from(address: IpAddr) -> IpAddr {
+    match address {
+        IpAddr::V4(_) => Ipv4Addr::UNSPECIFIED.into(),
+        IpAddr::V6(_) => Ipv6Addr::UNSPECIFIED.into(),
     }
 }

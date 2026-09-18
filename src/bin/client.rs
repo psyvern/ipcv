@@ -8,7 +8,7 @@ use nokhwa::{
     utils::{CameraFormat, CameraIndex, FrameFormat, RequestedFormat, RequestedFormatType},
 };
 use std::{
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    net::{IpAddr, SocketAddr},
     time::Duration,
 };
 
@@ -43,11 +43,11 @@ async fn wait_for_server(
     listening_port: u16,
     camera_format: CameraFormat,
 ) -> std::io::Result<Option<(SocketAddr, Duration)>> {
-    let output = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
+    let output = UdpSocket::bind((ipcv::unspecified_from(group), 0)).await?;
     output.set_ttl(2)?;
     output.connect((group, port)).await?;
 
-    let input_socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, listening_port)).await?;
+    let input_socket = UdpSocket::bind((ipcv::unspecified_from(group), listening_port)).await?;
     // input_socket.set_timeout(5);
 
     let initial_message = {
@@ -92,7 +92,7 @@ async fn wait_for_server(
             Ok((size, address)) = input_socket.recv_from(&mut data) => {
                 let address = address.ip();
 
-                if let Some(ServerMessage::Start { port, interval }) = ServerMessage::from_bytes(&data[..size]) {
+                if let Some(ServerMessage::Open { port, interval }) = ServerMessage::from_bytes(&data[..size]) {
                     return Ok(Some((SocketAddr::new(address, port), interval)));
                 }
             }
@@ -110,7 +110,7 @@ async fn client_thread(
     address: SocketAddr,
     time: Duration,
 ) -> std::io::Result<bool> {
-    let input = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, port)).await?;
+    let input = UdpSocket::bind((ipcv::unspecified_from(address.ip()), port)).await?;
     let mut output = TcpStream::connect(address).await.unwrap();
 
     let mut events = EventStream::new();
@@ -155,8 +155,8 @@ async fn client_thread(
             },
             Ok(_) = input.recv(&mut data) => {
                 match ServerMessage::from_bytes(&data[..]) {
-                    Some(ServerMessage::Start { .. }) => {}
-                    Some(ServerMessage::Quit { force }) => {
+                    Some(ServerMessage::Open { .. }) => {}
+                    Some(ServerMessage::Close { force }) => {
                         if force {
                             println!("Server closed, closing...");
                             break false;
