@@ -251,10 +251,12 @@ pub async fn client_loop(
     let format = RequestedFormat::with_formats(
         RequestedFormatType::AbsoluteHighestFrameRate,
         &[
+            FrameFormat::MJPEG,
             FrameFormat::RAWRGB,
             FrameFormat::RAWBGR,
             FrameFormat::YUYV,
-            FrameFormat::MJPEG,
+            FrameFormat::NV12,
+            FrameFormat::GRAY,
         ],
     );
     // Arc<RwLock> to pass the camera format into the background callback thread.
@@ -271,7 +273,7 @@ pub async fn client_loop(
     std::thread::spawn(move || {
         while let Ok(bytes) = rx.recv() {
             let fmt = *camera_format_clone.read().unwrap();
-            
+
             if let Some(fmt) = fmt {
                 let width = fmt.resolution().width();
                 let height = fmt.resolution().height();
@@ -282,7 +284,9 @@ pub async fn client_loop(
                     fmt.resolution(),
                     &bytes,
                 ) {
-                    if let Some(frame) = image::ImageBuffer::<image::Rgb<u8>, _>::from_vec(width, height, rgb_bytes) {
+                    if let Some(frame) =
+                        image::ImageBuffer::<image::Rgb<u8>, _>::from_vec(width, height, rgb_bytes)
+                    {
                         let (p_width, p_height, p_rgba) = ipcv::generate_preview(&frame, 340);
                         let _ = gui_output_clone.try_send(gui::Message::ClientEvent(
                             gui::ClientEvent::PreviewFrame(p_width, p_height, p_rgba),

@@ -15,9 +15,10 @@ pub enum ClientEvent {
 }
 
 pub fn run() -> iced::Result {
-    iced::application("IPCV Client GUI", update, view)
+    iced::application(State::default, update, view)
+        .title(|_: &State| "IPCV Client GUI".to_owned())
         .subscription(subscription)
-        .theme(|_| Theme::Dark)
+        .theme(|_: &State| Theme::Dark)
         .run()
 }
 
@@ -58,7 +59,8 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                     state.status = format!("Log: {}", msg);
                 }
                 ClientEvent::PreviewFrame(width, height, rgba) => {
-                    state.preview_frame = Some(iced::widget::image::Handle::from_rgba(width, height, rgba));
+                    state.preview_frame =
+                        Some(iced::widget::image::Handle::from_rgba(width, height, rgba));
                 }
             }
             Task::none()
@@ -85,7 +87,8 @@ fn view(state: &State) -> Element<'_, Message> {
     .spacing(20);
 
     if let Some(handle) = &state.preview_frame {
-        content = content.push(iced::widget::image(handle.clone()).width(iced::Length::Fixed(340.0)));
+        content =
+            content.push(iced::widget::image(handle.clone()).width(iced::Length::Fixed(340.0)));
     } else {
         content = content.push(
             container(text("No Preview").size(16))
@@ -94,7 +97,8 @@ fn view(state: &State) -> Element<'_, Message> {
         );
     }
 
-    content = content.push(button("Disconnect").on_press(Message::SendCommand(GuiCommand::Disconnect)));
+    content =
+        content.push(button("Disconnect").on_press(Message::SendCommand(GuiCommand::Disconnect)));
 
     container(content)
         .center_x(iced::Length::Fill)
@@ -105,19 +109,21 @@ fn view(state: &State) -> Element<'_, Message> {
 fn subscription(_state: &State) -> Subscription<Message> {
     struct ClientSubscription;
 
-    Subscription::run_with_id(
-        std::any::TypeId::of::<ClientSubscription>(),
-        iced::stream::channel(100, |mut output| async move {
-            let (gui_tx, gui_rx) = tokio::sync::mpsc::unbounded_channel();
-            let _ = output.send(Message::GuiTxReady(gui_tx)).await;
+    Subscription::run_with(std::any::TypeId::of::<ClientSubscription>(), |_| {
+        iced::stream::channel(
+            100,
+            |mut output: futures::channel::mpsc::Sender<Message>| async move {
+                let (gui_tx, gui_rx) = tokio::sync::mpsc::unbounded_channel();
+                let _ = output.send(Message::GuiTxReady(gui_tx)).await;
 
-            let _ = output
-                .send(Message::ClientEvent(ClientEvent::Started))
-                .await;
+                let _ = output
+                    .send(Message::ClientEvent(ClientEvent::Started))
+                    .await;
 
-            let args = crate::ARGS.get().unwrap().clone();
+                let args = crate::ARGS.get().unwrap().clone();
 
-            let _ = crate::client_loop(args, output, gui_rx).await;
-        }),
-    )
+                let _ = crate::client_loop(args, output, gui_rx).await;
+            },
+        )
+    })
 }

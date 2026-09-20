@@ -2,7 +2,7 @@ use clap::Parser;
 use colored::Colorize;
 use crossterm::event::{EventStream, KeyCode, KeyEvent, KeyModifiers};
 use futures::SinkExt;
-use futures::{FutureExt, StreamExt};
+use futures::StreamExt;
 use image::{ImageBuffer, Rgb};
 use ipcv::ClientMessage;
 use ipcv::ClientMessageParser;
@@ -146,7 +146,7 @@ async fn connection_thread(
                         let frame =
                             ImageBuffer::<Rgb<u8>, _>::from_vec(width, height, bytes).unwrap();
 
-                        let (preview_width, preview_height, preview_rgba) = ipcv::generate_preview(&frame, 340);
+                        let (preview_width, preview_height, preview_rgba) = ipcv::generate_preview(&frame, width);
 
                         let _ = output.send(gui::Message::ServerEvent(ServerEvent::FrameReceived {
                             address,
@@ -195,7 +195,12 @@ async fn loop_iteration(
                 GuiCommand::AcceptClient(address) => {
                     waiting_clients.remove(&address);
                 }
+                GuiCommand::OpenFolder(address) => {
+                    let path = settings.output.join(address.to_string());
+                    open::that_detached(path).unwrap();
+                }
                 GuiCommand::Disconnect => {} // Used by client
+                GuiCommand::Move(_, _) => {}
                 GuiCommand::Shutdown { force } => {
                     return Some(force);
                 }

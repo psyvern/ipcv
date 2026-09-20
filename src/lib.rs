@@ -154,8 +154,10 @@ pub enum ServerEvent {
 pub enum GuiCommand {
     Disconnect,
     DisconnectClient(IpAddr),
+    OpenFolder(IpAddr),
     AcceptClient(IpAddr),
     Shutdown { force: bool },
+    Move(usize, usize),
 }
 
 pub fn generate_preview(
