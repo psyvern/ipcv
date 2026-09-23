@@ -1,8 +1,11 @@
+mod gui;
+
 use clap::Parser;
 use colored::Colorize;
-use crossterm::event::{EventStream, KeyCode, KeyEvent, KeyModifiers};
-use futures::{FutureExt, StreamExt};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use futures::SinkExt;
 use image::{ImageBuffer, Rgb};
+use indexmap::IndexMap;
 use ipcv::ClientMessage;
 use ipcv::ClientMessageParser;
 use ipcv::ServerMessage;
@@ -16,6 +19,7 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use std::{fs::File, net::IpAddr, path::PathBuf};
 use tokio::io::AsyncReadExt;
@@ -25,7 +29,7 @@ use tokio::{net::UdpSocket, select};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone, Parser)]
-struct Args {
+pub struct Args {
     /// Multicast group to join
     #[arg(long, short, default_value = "224.1.1.1")]
     group: IpAddr,
@@ -44,6 +48,9 @@ struct Args {
     /// Output directory
     #[arg(long, short, default_value = "output")]
     output: PathBuf,
+    /// Enable Terminal User Interface (TUI) alongside the GUI
+    #[arg(long)]
+    pub tui: bool,
 }
 
 #[derive(Debug)]
@@ -55,7 +62,7 @@ struct ClientInfo {
     token: CancellationToken,
 }
 
-fn print_clients(clients: &HashMap<IpAddr, ClientInfo>) {
+fn print_clients(clients: &IndexMap<IpAddr, ClientInfo>) {
     let length = clients
         .values()
         .map(|x| x.host.len())
@@ -89,8 +96,9 @@ async fn connection_thread(
     token: CancellationToken,
     mut stream: TcpStream,
     socket: Arc<UdpSocket>,
+    mut output: futures::channel::mpsc::Sender<gui::Message>,
 ) -> std::io::Result<()> {
-    let mut counter = 0;
+    let mut counter = 0u64;
 
     let mut reader = ClientMessageParser::default();
 
@@ -131,6 +139,16 @@ async fn connection_thread(
                         let bytes = RgbFormat::write_output(format, Resolution::new(width, height), &bytes).unwrap();
                         let frame = ImageBuffer::<Rgb<u8>, _>::from_vec(width, height, bytes).unwrap();
 
+                        let (_, _, data) = ipcv::generate_preview(&frame, width);
+
+                        let _ = output.send(gui::Message::ServerEvent(ServerEvent::FrameReceived {
+                            address,
+                            frame_number: counter,
+                            width,
+                            height,
+                            data,
+                        })).await;
+
                         frame
                             .save(directory.join(format!("{counter:05}.png")))
                             .unwrap();
@@ -149,31 +167,42 @@ async fn connection_thread(
 
 async fn loop_iteration(
     settings: &Args,
-    clients: &mut HashMap<IpAddr, ClientInfo>,
+    clients: &mut IndexMap<IpAddr, ClientInfo>,
     join_set: &mut JoinSet<IpAddr>,
     data_socket: &Arc<UdpSocket>,
     listener: &mut TcpListener,
+    output: &mut futures::channel::mpsc::Sender<gui::Message>,
+    gui_rx: &mut tokio::sync::mpsc::UnboundedReceiver<InterfaceMessage>,
+    waiting_clients: &mut HashMap<IpAddr, String>,
 ) -> Option<bool> {
-    let mut events = EventStream::new();
-    let event = events.next().fuse();
     let mut data = [0u8; 4096];
 
     select! {
-        Some(Ok(crossterm::event::Event::Key(x))) = event => {
-            match x {
-                KeyEvent { code: KeyCode::Char('h'), modifiers: KeyModifiers::NONE, .. } => {
-                    print_clients(clients);
-                },
-                KeyEvent { code: KeyCode::Char('q'), modifiers: KeyModifiers::NONE, .. } => {
-                    return Some(false);
-                },
-                KeyEvent { code: KeyCode::Char('Q'), modifiers: KeyModifiers::SHIFT, .. } => {
-                    return Some(true);
-                },
-                x if is_closing_key(x) => {
-                    return Some(false);
+        Some(cmd) = gui_rx.recv() => {
+            match cmd {
+                InterfaceMessage::PrintClients =>
+            print_clients(clients)
+                ,
+                InterfaceMessage::DisconnectClient(address) => {
+                    if let Some(info) = clients.shift_remove(&address) {
+                        println!("Closing connection to `{}` via GUI", info.host);
+                        let msg = ServerMessage::Close { force: false }.into_bytes();
+                        let _ = data_socket.send_to(&msg, (address, info.port)).await;
+                        info.token.cancel();
+                        waiting_clients.insert(address, info.host.clone());
+                    }
                 }
-                _ => {}
+                InterfaceMessage::AcceptClient(address) => {
+                    waiting_clients.remove(&address);
+                }
+                InterfaceMessage::OpenFolder(address) => {
+                    let path = settings.output.join(address.to_string());
+                    open::that_detached(path).unwrap();
+                }
+                InterfaceMessage::Move(_, _) => {}
+                InterfaceMessage::Shutdown { force } => {
+                    return Some(force);
+                }
             }
         }
         Ok((size, address)) = data_socket.recv_from(&mut data) => {
@@ -216,15 +245,20 @@ async fn loop_iteration(
                         let token = token.clone();
                         let (stream, _) = listener.accept().await.unwrap();
                         let socket = data_socket.clone();
+                        let output = output.clone();
 
                         join_set.spawn(async move {
-                            if let Err(e) = connection_thread(width, height, format, address, port, settings, token, stream, socket).await {
+                            if let Err(e) = connection_thread(width, height, format, address, port, settings, token, stream, socket, output).await {
                                 eprintln!("{e}");
                             };
                             address
                         });
-
                     }
+
+                    let _ = output.send(gui::Message::ServerEvent(ServerEvent::ClientConnected {
+                        address,
+                        host: host.to_owned(),
+                    })).await;
 
                     println!(
                         "Added address {} as host {}",
@@ -245,7 +279,7 @@ async fn loop_iteration(
         }
         Some(x) = join_set.join_next() => {
             if let Ok(address) = x
-                && let Some(_) = clients.remove(&address) {
+                && let Some(_) = clients.shift_remove(&address) {
                     println!(
                         "Removed address {} from clients", address.to_string().bright_green().bold(),
                     );
@@ -257,15 +291,17 @@ async fn loop_iteration(
     None
 }
 
-#[tokio::main]
-async fn main() -> std::io::Result<()> {
-    let args = Args::parse();
-    println!("{args:?}");
-
-    std::fs::create_dir_all(&args.output)?;
-
+pub async fn server_loop(
+    args: Args,
+    output: &mut futures::channel::mpsc::Sender<gui::Message>,
+    mut gui_rx: tokio::sync::mpsc::UnboundedReceiver<InterfaceMessage>,
+) -> std::io::Result<()> {
     let stdin = std::io::stdin();
-    let old_term = TermMode::new(stdin)?;
+    let old_term = if args.tui {
+        Some(TermMode::new(stdin)?)
+    } else {
+        None
+    };
 
     let socket = Arc::new(UdpSocket::bind((ipcv::unspecified_from(args.group), args.port)).await?);
     match args.group {
@@ -273,31 +309,102 @@ async fn main() -> std::io::Result<()> {
         IpAddr::V6(address) => socket.join_multicast_v6(&address, 0),
     }?;
 
-    let mut clients = HashMap::new();
+    let mut clients = IndexMap::new();
+    let mut waiting_clients = HashMap::new();
     let mut join_set = JoinSet::new();
     let mut listener =
         TcpListener::bind((ipcv::unspecified_from(args.group), args.tcp_port)).await?;
 
     loop {
-        let force =
-            loop_iteration(&args, &mut clients, &mut join_set, &socket, &mut listener).await;
+        let force = loop_iteration(
+            &args,
+            &mut clients,
+            &mut join_set,
+            &socket,
+            &mut listener,
+            output,
+            &mut gui_rx,
+            &mut waiting_clients,
+        )
+        .await;
 
         if let Some(force) = force {
             let msg = ServerMessage::Close { force }.into_bytes();
             for (address, info) in clients {
                 println!("Closing connection to `{}`", info.host);
                 socket.send_to(&msg, (address, info.port)).await?;
-
                 info.token.cancel();
             }
 
             join_set.join_all().await;
-
             break;
         }
     }
 
-    drop(old_term);
+    if let Some(old_term) = old_term {
+        drop(old_term);
+    }
 
     Ok(())
+}
+
+fn map_key(event: KeyEvent) -> Option<InterfaceMessage> {
+    match event {
+        KeyEvent {
+            code: KeyCode::Char('h'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } => Some(InterfaceMessage::PrintClients),
+        KeyEvent {
+            code: KeyCode::Char('q'),
+            modifiers: KeyModifiers::NONE,
+            ..
+        } => Some(InterfaceMessage::Shutdown { force: false }),
+        KeyEvent {
+            code: KeyCode::Char('Q'),
+            modifiers: KeyModifiers::SHIFT,
+            ..
+        } => Some(InterfaceMessage::Shutdown { force: true }),
+        x if is_closing_key(x) => Some(InterfaceMessage::Shutdown { force: false }),
+        _ => None,
+    }
+}
+
+pub static ARGS: OnceLock<Args> = OnceLock::new();
+
+fn main() -> iced::Result {
+    let args = Args::parse();
+    println!("{args:?}");
+
+    ARGS.set(args.clone()).unwrap();
+
+    std::fs::create_dir_all(&args.output).unwrap();
+
+    gui::run()
+}
+
+#[derive(Debug, Clone)]
+pub enum ServerEvent {
+    Stopped,
+    ClientConnected {
+        address: IpAddr,
+        host: String,
+    },
+    FrameReceived {
+        address: IpAddr,
+        frame_number: u64,
+        width: u32,
+        height: u32,
+        data: Vec<u8>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub enum InterfaceMessage {
+    PrintClients,
+    DisconnectClient(IpAddr),
+    OpenFolder(IpAddr),
+    AcceptClient(IpAddr),
+    Shutdown { force: bool },
+    Move(usize, usize),
 }

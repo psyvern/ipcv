@@ -3,14 +3,6 @@ name = "ipcv"
 version = "0.1.0"
 edition = "2024"
 
-# [[bin]]
-# name = "server"
-# path = "src/server.rs"
-
-# [[bin]]
-# name = "client"
-# path = "src/client.rs"
-
 [dependencies]
 bytes = "1.12.1"
 clap = { version = "4.6.6", features = ["derive"] }
@@ -19,12 +11,20 @@ crossterm = { version = "0.29.0", features = ["event-stream"] }
 futures = "0.3.34"
 hostname = "0.4.2"
 humantime = "2.4.0"
+iced = { version = "0.15.0-dev", features = ["image", "tokio"] }
 image = "0.25.10"
+indexmap = "2.14.2"
 itertools = "0.15.0"
 local-ip-address = "0.6.13"
+lucide-icons = { version = "1.45.0" }
 nokhwa = { version = "0.10.11", features = ["input-native", "output-threaded"] }
+open = "5.4.4"
 tokio = { version = "1.53.1", features = ["full"] }
 tokio-util = "0.7.19"
 
-[target.'cfg(unix)'.dependencies]
+[target."cfg(unix)".dependencies]
 termios = "0.3.3"
+
+[patch.crates-io]
+iced.git = "https://github.com/iced-rs/iced.git"
+iced.rev = "78606382bfae72e59a3274c792ca70c716553af5"
