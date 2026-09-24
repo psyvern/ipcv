@@ -2,7 +2,7 @@ use clap::Parser;
 use colored::Colorize;
 use crossterm::event::{EventStream, KeyCode, KeyEvent, KeyModifiers};
 use futures::{FutureExt, StreamExt};
-use ipcv::{ClientMessage, ServerMessage, TermMode, is_closing_key};
+use ipcv::{ClientInitialMessage, ClientMessage, ServerMessage, TermMode, is_closing_key};
 use nokhwa::{
     CallbackCamera,
     utils::{CameraFormat, CameraIndex, FrameFormat, RequestedFormat, RequestedFormatType},
@@ -50,23 +50,12 @@ async fn wait_for_server(
     let input_socket = UdpSocket::bind((ipcv::unspecified_from(group), listening_port)).await?;
     // input_socket.set_timeout(5);
 
-    let initial_message = {
-        let mut value = b"open ".to_vec();
-        value.extend(listening_port.to_be_bytes());
-        value.extend(camera_format.resolution().width().to_be_bytes());
-        value.extend(camera_format.resolution().height().to_be_bytes());
-        value.push(match camera_format.format() {
-            FrameFormat::MJPEG => 0,
-            FrameFormat::YUYV => 1,
-            FrameFormat::NV12 => 2,
-            FrameFormat::GRAY => 3,
-            FrameFormat::RAWRGB => 4,
-            FrameFormat::RAWBGR => 5,
-        });
-        value.extend(hostname::get()?.to_string_lossy().bytes());
-
-        value
-    };
+    let initial_message = ClientInitialMessage {
+        port: listening_port,
+        format: camera_format,
+        host: hostname::get()?.to_string_lossy().into_owned(),
+    }
+    .into_bytes();
 
     let mut events = EventStream::new();
     let mut data = [0u8; 4096];

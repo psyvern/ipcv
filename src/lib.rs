@@ -6,8 +6,10 @@ use std::{
 
 use bytes::Bytes;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use futures::{SinkExt, channel::mpsc::Sender};
 use image::{ImageBuffer, Rgb};
-use itertools::Itertools;
+use itertools::{Itertools, chain};
+use nokhwa::utils::{CameraFormat, FrameFormat};
 
 pub fn is_closing_key(event: KeyEvent) -> bool {
     matches!(
@@ -178,6 +180,61 @@ impl ClientMessageParser {
     }
 }
 
+/// The message a client while waiting for a connection
+pub struct ClientInitialMessage {
+    pub port: u16,
+    pub format: CameraFormat,
+    pub host: String,
+}
+
+impl ClientInitialMessage {
+    pub fn into_bytes(self) -> Vec<u8> {
+        chain!(
+            b"open ".to_owned(),
+            self.port.to_be_bytes(),
+            self.format.width().to_be_bytes(),
+            self.format.height().to_be_bytes(),
+            self.format.frame_rate().to_be_bytes(),
+            std::iter::once(match self.format.format() {
+                FrameFormat::MJPEG => 0,
+                FrameFormat::YUYV => 1,
+                FrameFormat::NV12 => 2,
+                FrameFormat::GRAY => 3,
+                FrameFormat::RAWRGB => 4,
+                FrameFormat::RAWBGR => 5,
+            }),
+            self.host.bytes(),
+        )
+        .collect()
+    }
+
+    pub fn from_bytes(data: &[u8]) -> Option<Self> {
+        let data = data.strip_prefix(b"open ")?;
+
+        let mut data = data.iter().copied();
+        let port = u16::from_be_bytes(data.next_array()?);
+        let width = u32::from_be_bytes(data.next_array()?);
+        let height = u32::from_be_bytes(data.next_array()?);
+        let frame_rate = u32::from_be_bytes(data.next_array()?);
+        let format = match data.next()? {
+            0 => FrameFormat::MJPEG,
+            1 => FrameFormat::YUYV,
+            2 => FrameFormat::NV12,
+            3 => FrameFormat::GRAY,
+            4 => FrameFormat::RAWRGB,
+            5 => FrameFormat::RAWBGR,
+            x => panic!("Unknown frame format: {x}"),
+        };
+        let host = String::from_utf8(data.collect()).ok()?;
+
+        Some(Self {
+            port,
+            format: CameraFormat::new_from(width, height, format, frame_rate),
+            host,
+        })
+    }
+}
+
 /// Returns the unspecified IP address for the same IP version.
 ///
 /// Returns `0.0.0.0` for IPv4 and `::` for IPv6.
@@ -219,4 +276,45 @@ pub fn generate_preview(
     }
 
     (new_width, new_height, rgba)
+}
+
+pub trait SenderExt<T>: Clone + Send + 'static {
+    type Output<'a>: Future + Send
+    where
+        Self: 'a;
+    fn send(&mut self, message: T) -> Self::Output<'_>;
+
+    fn map<I, F>(self, map: F) -> MapSender<Self, F>
+    where
+        F: Fn(I) -> T,
+    {
+        MapSender { inner: self, map }
+    }
+}
+
+#[derive(Clone)]
+pub struct MapSender<O, F> {
+    inner: O,
+    map: F,
+}
+
+impl<T: Clone + Send + 'static> SenderExt<T> for Sender<T> {
+    type Output<'a> = futures::sink::Send<'a, Self, T>;
+
+    fn send(&mut self, message: T) -> Self::Output<'_> {
+        SinkExt::send(self, message)
+    }
+}
+
+impl<T, R, O, F> SenderExt<T> for MapSender<O, F>
+where
+    T: Clone + Send + 'static,
+    O: SenderExt<R> + Clone + Send + 'static,
+    F: Fn(T) -> R + Clone + Send + 'static,
+{
+    type Output<'a> = O::Output<'a>;
+
+    fn send(&mut self, message: T) -> Self::Output<'_> {
+        SenderExt::send(&mut self.inner, (self.map)(message))
+    }
 }
