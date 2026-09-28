@@ -238,8 +238,8 @@ fn view(state: &State) -> Element<'_, InterfaceMessage> {
             .align_left(360),
         );
 
-        if client.waiting {
-            client_col = client_col.push(
+        {
+            let row = if client.waiting {
                 row![
                     button(row![Icon::CircleDashedCheck.widget(), "Accept"].spacing(4))
                         .style(iced::widget::button::success)
@@ -248,30 +248,31 @@ fn view(state: &State) -> Element<'_, InterfaceMessage> {
                         .style(iced::widget::button::danger)
                         .on_press(InterfaceMessage::DisconnectClient(address)),
                 ]
-                .spacing(8),
-            );
-        } else {
-            client_col = client_col.push(
+            } else {
                 row![
                     button(row![Icon::ExternalLink.widget(), "Open folder"].spacing(4))
                         .on_press(InterfaceMessage::OpenFolder(address)),
                     button(row![Icon::Unplug.widget(), "Disconnect"].spacing(4))
                         .style(iced::widget::button::danger)
                         .on_press(InterfaceMessage::DisconnectClient(address)),
-                    button(Icon::ArrowLeft.widget())
-                        .style(iced::widget::button::background)
-                        .on_press_maybe(
-                            (index > 0).then(|| InterfaceMessage::Move(index, index - 1))
-                        ),
-                    button(Icon::ArrowRight.widget())
-                        .style(iced::widget::button::background)
-                        .on_press_maybe(
-                            (index + 1 < state.clients.len())
-                                .then(|| InterfaceMessage::Move(index, index + 1))
-                        ),
                 ]
-                .spacing(8),
-            );
+            }
+            .push(
+                button(Icon::ArrowLeft.widget())
+                    .style(iced::widget::button::background)
+                    .on_press_maybe((index > 0).then(|| InterfaceMessage::Move(index, index - 1))),
+            )
+            .push(
+                button(Icon::ArrowRight.widget())
+                    .style(iced::widget::button::background)
+                    .on_press_maybe(
+                        (index + 1 < state.clients.len())
+                            .then(|| InterfaceMessage::Move(index, index + 1)),
+                    ),
+            )
+            .spacing(8);
+
+            client_col = client_col.push(row);
         }
 
         clients_grid = clients_grid.push(
