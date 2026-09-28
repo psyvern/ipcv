@@ -1,8 +1,11 @@
 use clap::Parser;
 use colored::Colorize;
 use crossterm::event::{EventStream, KeyCode, KeyEvent, KeyModifiers};
-use futures::{FutureExt, StreamExt};
-use ipcv::{ClientInitialMessage, ClientMessage, ServerMessage, TermMode, is_closing_key};
+use futures::{FutureExt, SinkExt, StreamExt};
+use ipcv::{
+    TermMode, is_closing_key,
+    messages::{ClientInitialMessage, ClientMessage, Decode, Encode, ServerMessage},
+};
 use nokhwa::{
     CallbackCamera,
     utils::{CameraFormat, CameraIndex, FrameFormat, RequestedFormat, RequestedFormatType},
@@ -11,12 +14,11 @@ use std::{
     net::{IpAddr, SocketAddr},
     time::Duration,
 };
-
 use tokio::{
-    io::AsyncWriteExt,
     net::{TcpStream, UdpSocket},
     select,
 };
+use tokio_util::{codec::FramedWrite, udp::UdpFramed};
 
 #[derive(Debug, Clone, Parser)]
 struct Args {
@@ -76,7 +78,6 @@ async fn wait_for_server(
                     }
                     _ => {}
                 }
-
             },
             Ok((size, address)) = input_socket.recv_from(&mut data) => {
                 let address = address.ip();
@@ -100,10 +101,10 @@ async fn client_thread(
     time: Duration,
 ) -> std::io::Result<bool> {
     let input = UdpSocket::bind((ipcv::unspecified_from(address.ip()), port)).await?;
-    let mut output = TcpStream::connect(address).await.unwrap();
+    let mut input = UdpFramed::new(input, ServerMessage::decoder());
+    let mut output = FramedWrite::new(TcpStream::connect(address).await?, ClientMessage::encoder());
 
     let mut events = EventStream::new();
-    let mut data = [0u8; 1024];
     let mut counter = 0;
 
     let mut interval = tokio::time::interval(time);
@@ -117,7 +118,7 @@ async fn client_thread(
                 if let Ok(frame) = frame {
                     let bytes = frame.buffer_bytes();
 
-                    let _ = output.write_all(&ClientMessage::Frame(bytes).into_bytes()).await;
+                    let _ = output.send(ClientMessage::Frame(bytes)).await;
 
                     // socket.send(counter.to_string().into_bytes());
                     println!("Sending frame: {}", counter.to_string().bright_cyan().bold());
@@ -126,26 +127,26 @@ async fn client_thread(
             }
             _ = heartbeat.tick() => {
                 println!("Server did not heartbeat, detaching...");
-                let _ = output.write_all(&ClientMessage::Close.into_bytes()).await;
+                let _ = output.send(ClientMessage::Close).await;
                 break true;
             }
             Some(Ok(crossterm::event::Event::Key(x))) = events.next().fuse() => {
                 match x {
                     KeyEvent { code: KeyCode::Char('q'), modifiers: KeyModifiers::NONE, .. } | KeyEvent { code: KeyCode::Char('Q'), modifiers: KeyModifiers::SHIFT, .. } => {
-                        output.write_all(&ClientMessage::Close.into_bytes()).await?;
+                        output.send(ClientMessage::Close).await?;
                         break false;
                     },
                     x if is_closing_key(x) => {
-                        output.write_all(&ClientMessage::Close.into_bytes()).await?;
+                        output.send(ClientMessage::Close).await?;
                         break false;
                     }
                     _ => {}
                 }
             },
-            Ok(_) = input.recv(&mut data) => {
-                match ServerMessage::from_bytes(&data[..]) {
-                    Some(ServerMessage::Open { .. }) => {}
-                    Some(ServerMessage::Close { force }) => {
+            Some(Ok((msg, _))) = input.next() => {
+                match msg {
+                    ServerMessage::Open { .. } => {}
+                    ServerMessage::Close { force } => {
                         if force {
                             println!("Server closed, closing...");
                             break false;
@@ -154,13 +155,12 @@ async fn client_thread(
                             break true;
                         }
                     }
-                    Some(ServerMessage::Heartbeat) => heartbeat.reset(),
-                    Some(ServerMessage::UpdateInterval(x)) => {
+                    ServerMessage::Heartbeat => heartbeat.reset(),
+                    ServerMessage::UpdateInterval(x) => {
                         interval = tokio::time::interval(x);
                         heartbeat = tokio::time::interval(x * 10);
                         heartbeat.tick().await;
                     }
-                    None => {}
                 }
             }
         }

@@ -20,7 +20,7 @@ lucide-icons = { version = "1.45.0" }
 nokhwa = { version = "0.10.11", features = ["input-native", "output-threaded"] }
 open = "5.4.4"
 tokio = { version = "1.53.1", features = ["full"] }
-tokio-util = "0.7.19"
+tokio-util = { version = "0.7.19", features = ["codec", "net"] }
 
 [target."cfg(unix)".dependencies]
 termios = "0.3.3"

@@ -1,11 +1,11 @@
 use crossterm::event::EventStream;
-use futures::StreamExt;
+use futures::{SinkExt, StreamExt};
 use iced::border::rounded;
 use iced::font::Weight;
 use iced::widget::{button, column, container, rich_text, row, scrollable, span, text};
 use iced::{Alignment, Element, Font, Length, Subscription, Task, Theme, never};
 use indexmap::IndexMap;
-use ipcv::SenderExt;
+use ipcv::{CustomSender, MapSender};
 use lucide_icons::Icon;
 use std::net::{IpAddr, Ipv4Addr};
 use tokio::sync::mpsc::UnboundedSender;
@@ -120,6 +120,9 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                     client.waiting = false;
                 }
             }
+            ServerEvent::ClientDisconnected { address } => {
+                state.clients.shift_remove(&address);
+            }
             ServerEvent::FrameReceived {
                 address,
                 frame_number,
@@ -143,9 +146,6 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         }
         Message::Interface(cmd) => {
             match cmd {
-                InterfaceMessage::DisconnectClient(address) => {
-                    state.clients.shift_remove(&address);
-                }
                 InterfaceMessage::Move(from, to) => {
                     state.clients.move_index(from, to);
                 }
@@ -303,9 +303,7 @@ fn view(state: &State) -> Element<'_, InterfaceMessage> {
 }
 
 fn subscription(_state: &State) -> Subscription<Message> {
-    struct ServerSubscription;
-
-    Subscription::run_with(std::any::TypeId::of::<ServerSubscription>(), |_| {
+    Subscription::run(|| {
         iced::stream::channel(
             100,
             |mut output: futures::channel::mpsc::Sender<Message>| async move {
@@ -330,7 +328,7 @@ fn subscription(_state: &State) -> Subscription<Message> {
                     });
                 }
 
-                let mut output = output.map(Message::ServerEvent);
+                let mut output = MapSender::new(output, Message::ServerEvent);
                 let _ = crate::server_loop(args, &mut output, gui_rx).await;
                 let _ = output.send(ServerEvent::Stopped).await;
             },

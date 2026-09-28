@@ -3,30 +3,37 @@ mod gui;
 use clap::Parser;
 use colored::Colorize;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use futures::SinkExt;
+use futures::StreamExt;
 use image::{ImageBuffer, Rgb};
 use indexmap::IndexMap;
-use ipcv::ClientInitialMessage;
-use ipcv::ClientMessage;
-use ipcv::ClientMessageParser;
-use ipcv::SenderExt;
-use ipcv::ServerMessage;
+use ipcv::CustomSender;
+use ipcv::MapSender;
 use ipcv::TermMode;
 use ipcv::is_closing_key;
+use ipcv::messages::ClientInitialMessage;
+use ipcv::messages::ClientMessage;
+use ipcv::messages::CustomCodec;
+use ipcv::messages::Decode;
+use ipcv::messages::Encode;
+use ipcv::messages::ServerMessage;
 use nokhwa::FormatDecoder;
 use nokhwa::pixel_format::RgbFormat;
 use nokhwa::utils::CameraFormat;
 use std::io::Write;
 use std::net::Ipv4Addr;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use std::{fs::File, net::IpAddr, path::PathBuf};
-use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::task::JoinSet;
 use tokio::{net::UdpSocket, select};
+use tokio_util::codec::FramedRead;
 use tokio_util::sync::CancellationToken;
+use tokio_util::udp::UdpFramed;
 
 #[derive(Debug, Clone, Parser)]
 pub struct Args {
@@ -93,25 +100,22 @@ fn print_clients(clients: &IndexMap<IpAddr, ClientInfo>) {
 
 async fn connection_thread(
     format: CameraFormat,
-    address: IpAddr,
-    port: u16,
+    address: SocketAddr,
     settings: Args,
     token: CancellationToken,
-    mut stream: TcpStream,
-    socket: Arc<UdpSocket>,
-    mut output: impl SenderExt<ServerEvent>,
+    stream: TcpStream,
+    mut socket: impl CustomSender<ServerMessage>,
+    mut output: impl CustomSender<ServerEvent>,
 ) -> std::io::Result<()> {
     let mut counter = 0u64;
 
-    let mut reader = ClientMessageParser::default();
+    let mut reader = FramedRead::new(stream, ClientMessage::decoder());
 
     let directory = settings.output.join(address.to_string());
     let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir(&directory)?;
 
     let mut log = File::create(directory.join("output.log"))?;
-
-    let mut packet = [0; 4096];
 
     let mut interval = tokio::time::interval(settings.update_interval * 10);
     interval.tick().await;
@@ -129,23 +133,21 @@ async fn connection_thread(
                 break;
             }
             _ = interval_2.tick() => {
-                let _ = socket.send_to(&ServerMessage::Heartbeat.into_bytes(), (address, port)).await;
+                let _ = socket.send(ServerMessage::Heartbeat).await;
             }
-            Ok(amount) = stream.read(&mut packet) => {
+            Some(Ok(amount)) = reader.next() => {
                 interval.reset();
-                // println!("{amount}");
 
-                match reader.read(&packet[..amount]) {
-                    None => {},
-                    Some(ClientMessage::Close) => break,
-                    Some(ClientMessage::Frame(bytes)) => {
+                match amount {
+                    ClientMessage::Close => break,
+                    ClientMessage::Frame(bytes) => {
                         let bytes = RgbFormat::write_output(format.format(), format.resolution(), &bytes).unwrap();
                         let frame = ImageBuffer::<Rgb<u8>, _>::from_vec(format.width(), format.height(), bytes).unwrap();
 
                         let (_, _, data) = ipcv::generate_preview(&frame, format.width());
 
                         let _ = output.send(ServerEvent::FrameReceived {
-                            address,
+                            address: address.ip(),
                             frame_number: counter,
                             width: format.width(),
                             height: format.height(),
@@ -174,10 +176,13 @@ async fn loop_iteration(
     join_set: &mut JoinSet<IpAddr>,
     data_socket: &Arc<UdpSocket>,
     listener: &mut TcpListener,
-    output: &mut impl SenderExt<ServerEvent>,
+    output: &mut (impl CustomSender<ServerEvent> + Clone),
     gui_rx: &mut UnboundedReceiver<InterfaceMessage>,
 ) -> Option<bool> {
-    let mut data = [0u8; 4096];
+    let mut data_socket_2 = UdpFramed::new(
+        data_socket.clone(),
+        CustomCodec::<ServerMessage, ClientInitialMessage>::new(),
+    );
 
     select! {
         Some(cmd) = gui_rx.recv() => {
@@ -187,17 +192,19 @@ async fn loop_iteration(
                     if let Some(info) = clients.shift_remove(&address)
                         && let ClientStatus::Connected(token) = info.status {
                             println!("Closing connection to `{}` via GUI", info.host);
-                            let msg = ServerMessage::Close { force: false }.into_bytes();
-                            let _ = data_socket.send_to(&msg, (address, info.port)).await;
+                            let msg = ServerMessage::Close { force: false };
+                            let _ = data_socket_2.send((msg, (address, info.port).into())).await;
                             token.cancel();
+
+                            let _ = output.send(ServerEvent::ClientDisconnected { address }).await;
                         }
                 }
                 InterfaceMessage::AcceptClient(address) => {
                     if let Some(client) = clients.get_mut(&address) {
-                        data_socket.send_to(
-                            &ServerMessage::Open { port: settings.tcp_port, interval: settings.update_interval }.into_bytes(),
-                            (address, client.port),
-                        ).await.unwrap();
+                        data_socket_2.send((
+                            ServerMessage::Open { port: settings.tcp_port, interval: settings.update_interval },
+                            (address, client.port).into(),
+                        )).await.unwrap();
 
                         let token = CancellationToken::new();
 
@@ -208,13 +215,18 @@ async fn loop_iteration(
                             let socket = data_socket.clone();
                             let output = output.clone();
                             let format = client.format;
-                            let port = client.port;
+                            let address = SocketAddr::from((address, client.port));
+
+                            let socket = MapSender::new(
+                                UdpFramed::new(socket, ServerMessage::encoder()),
+                                move |x| (x, address),
+                            );
 
                             join_set.spawn(async move {
-                                if let Err(e) = connection_thread(format, address, port, settings, token, stream, socket, output).await {
+                                if let Err(e) = connection_thread(format, address, settings, token, stream, socket, output).await {
                                     eprintln!("{e}");
                                 };
-                                address
+                                address.ip()
                             });
                         }
 
@@ -233,31 +245,29 @@ async fn loop_iteration(
                 }
             }
         }
-        Ok((size, address)) = data_socket.recv_from(&mut data) => {
+        Some(Ok((ClientInitialMessage { port, format, host }, address))) = StreamExt::next(&mut data_socket_2) => {
             let address = address.ip();
-            let data = &data[..size];
 
-            if let Some(ClientInitialMessage { port, format, host }) = ClientInitialMessage::from_bytes(data)
-                && !clients.contains_key(&address) {
-                    let _ = output.send(ServerEvent::ClientConnected {
-                        address,
-                        host: host.to_owned(),
-                    }).await;
+            if !clients.contains_key(&address) {
+                let _ = output.send(ServerEvent::ClientConnected {
+                    address,
+                    host: host.to_owned(),
+                }).await;
 
-                    println!(
-                        "Added address {} as host {}",
-                        address.to_string().bright_green().bold(),
-                        host.bright_blue().bold()
-                    );
+                println!(
+                    "Added address {} as host {}",
+                    address.to_string().bright_green().bold(),
+                    host.bright_blue().bold()
+                );
 
-                    let info = ClientInfo {
-                        host,
-                        port,
-                        format,
-                        status: ClientStatus::Waiting,
-                    };
-                    clients.insert(address, info);
-                }
+                let info = ClientInfo {
+                    host,
+                    port,
+                    format,
+                    status: ClientStatus::Waiting,
+                };
+                clients.insert(address, info);
+            }
         }
         Some(x) = join_set.join_next() => {
             if let Ok(address) = x
@@ -275,7 +285,7 @@ async fn loop_iteration(
 
 pub async fn server_loop(
     args: Args,
-    output: &mut impl SenderExt<ServerEvent>,
+    output: &mut (impl CustomSender<ServerEvent> + Clone),
     mut gui_rx: UnboundedReceiver<InterfaceMessage>,
 ) -> std::io::Result<()> {
     let stdin = std::io::stdin();
@@ -296,6 +306,8 @@ pub async fn server_loop(
     let mut listener =
         TcpListener::bind((ipcv::unspecified_from(args.group), args.tcp_port)).await?;
 
+    let mut socket_2 = UdpFramed::new(socket.clone(), ServerMessage::encoder());
+
     loop {
         let force = loop_iteration(
             &args,
@@ -309,11 +321,12 @@ pub async fn server_loop(
         .await;
 
         if let Some(force) = force {
-            let msg = ServerMessage::Close { force }.into_bytes();
             for (address, info) in clients {
                 if let ClientStatus::Connected(token) = info.status {
                     println!("Closing connection to `{}`", info.host);
-                    socket.send_to(&msg, (address, info.port)).await?;
+                    socket_2
+                        .send((ServerMessage::Close { force }, (address, info.port).into()))
+                        .await?;
                     token.cancel();
                 }
             }
@@ -373,6 +386,9 @@ pub enum ServerEvent {
         host: String,
     },
     ClientAccepted {
+        address: IpAddr,
+    },
+    ClientDisconnected {
         address: IpAddr,
     },
     FrameReceived {

@@ -1,15 +1,13 @@
+pub mod messages;
+
 use std::{
     io::Stdin,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
-    time::Duration,
 };
 
-use bytes::Bytes;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use futures::{SinkExt, channel::mpsc::Sender};
+use futures::{Sink, SinkExt};
 use image::{ImageBuffer, Rgb};
-use itertools::{Itertools, chain};
-use nokhwa::utils::{CameraFormat, FrameFormat};
 
 pub fn is_closing_key(event: KeyEvent) -> bool {
     matches!(
@@ -64,177 +62,6 @@ cfg_select! {
     }
 }
 
-/// A message sent from the server to the client
-#[derive(Debug)]
-pub enum ServerMessage {
-    /// Open the TCP connection
-    Open {
-        /// The port of the TCP socket
-        port: u16,
-        /// How often to send frame updates
-        interval: Duration,
-    },
-    /// Close the connection
-    Close {
-        /// Whether to also quit the client program
-        force: bool,
-    },
-    /// Change the frame update interval
-    UpdateInterval(Duration),
-    /// Message to keep the connection alive
-    Heartbeat,
-}
-
-impl ServerMessage {
-    pub fn into_bytes(self) -> Vec<u8> {
-        match self {
-            Self::Open { port, interval } => {
-                let mut result = vec![0];
-                result.extend(port.to_be_bytes());
-                result.extend(interval.as_secs_f64().to_be_bytes());
-
-                result
-            }
-            Self::Close { force } => vec![1, force as u8],
-            Self::Heartbeat => vec![2],
-            Self::UpdateInterval(interval) => {
-                let mut result = vec![3];
-                result.extend(interval.as_secs_f64().to_be_bytes());
-
-                result
-            }
-        }
-    }
-
-    pub fn from_bytes(data: &[u8]) -> Option<ServerMessage> {
-        let mut data = data.iter().copied();
-        Some(match data.next()? {
-            0 => {
-                let port = u16::from_be_bytes(data.next_array()?);
-                let interval = Duration::from_secs_f64(f64::from_be_bytes(data.next_array()?));
-
-                Self::Open { port, interval }
-            }
-            1 => {
-                let force = data.next()? != 0;
-                Self::Close { force }
-            }
-            2 => Self::Heartbeat,
-            3 => {
-                let interval = Duration::from_secs_f64(f64::from_be_bytes(data.next_array()?));
-                Self::UpdateInterval(interval)
-            }
-            x => panic!("Received unknown message type: {x}"),
-        })
-    }
-}
-
-/// A message sent from the client to the server
-pub enum ClientMessage {
-    Frame(Bytes),
-    Close,
-}
-
-impl ClientMessage {
-    pub fn into_bytes(self) -> Vec<u8> {
-        match self {
-            Self::Frame(data) => {
-                let mut result = vec![0];
-                result.extend((data.len() as u32).to_be_bytes());
-                result.extend(data);
-                result
-            }
-            Self::Close => vec![1],
-        }
-    }
-}
-
-#[derive(Default)]
-pub struct ClientMessageParser {
-    data: Vec<u8>,
-}
-
-impl ClientMessageParser {
-    pub fn read(&mut self, packet: &[u8]) -> Option<ClientMessage> {
-        self.data.extend(packet);
-
-        let result = match self.data.first()? {
-            0 => {
-                let data = self.data.get(1..5)?;
-                let size = u32::from_be_bytes(data.try_into().ok()?) as usize;
-                if self.data.len() >= 5 + size {
-                    let inner = self.data.drain(..5 + size).skip(5).collect();
-                    ClientMessage::Frame(inner)
-                } else {
-                    return None;
-                }
-            }
-            1 => {
-                self.data.drain(..1);
-                ClientMessage::Close
-            }
-            x => panic!("Received unknown message type: {x}"),
-        };
-
-        Some(result)
-    }
-}
-
-/// The message a client while waiting for a connection
-pub struct ClientInitialMessage {
-    pub port: u16,
-    pub format: CameraFormat,
-    pub host: String,
-}
-
-impl ClientInitialMessage {
-    pub fn into_bytes(self) -> Vec<u8> {
-        chain!(
-            b"open ".to_owned(),
-            self.port.to_be_bytes(),
-            self.format.width().to_be_bytes(),
-            self.format.height().to_be_bytes(),
-            self.format.frame_rate().to_be_bytes(),
-            std::iter::once(match self.format.format() {
-                FrameFormat::MJPEG => 0,
-                FrameFormat::YUYV => 1,
-                FrameFormat::NV12 => 2,
-                FrameFormat::GRAY => 3,
-                FrameFormat::RAWRGB => 4,
-                FrameFormat::RAWBGR => 5,
-            }),
-            self.host.bytes(),
-        )
-        .collect()
-    }
-
-    pub fn from_bytes(data: &[u8]) -> Option<Self> {
-        let data = data.strip_prefix(b"open ")?;
-
-        let mut data = data.iter().copied();
-        let port = u16::from_be_bytes(data.next_array()?);
-        let width = u32::from_be_bytes(data.next_array()?);
-        let height = u32::from_be_bytes(data.next_array()?);
-        let frame_rate = u32::from_be_bytes(data.next_array()?);
-        let format = match data.next()? {
-            0 => FrameFormat::MJPEG,
-            1 => FrameFormat::YUYV,
-            2 => FrameFormat::NV12,
-            3 => FrameFormat::GRAY,
-            4 => FrameFormat::RAWRGB,
-            5 => FrameFormat::RAWBGR,
-            x => panic!("Unknown frame format: {x}"),
-        };
-        let host = String::from_utf8(data.collect()).ok()?;
-
-        Some(Self {
-            port,
-            format: CameraFormat::new_from(width, height, format, frame_rate),
-            host,
-        })
-    }
-}
-
 /// Returns the unspecified IP address for the same IP version.
 ///
 /// Returns `0.0.0.0` for IPv4 and `::` for IPv6.
@@ -278,43 +105,35 @@ pub fn generate_preview(
     (new_width, new_height, rgba)
 }
 
-pub trait SenderExt<T>: Clone + Send + 'static {
+#[derive(Clone)]
+pub struct MapSender<S, F> {
+    inner: S,
+    map: F,
+}
+
+impl<S, F> MapSender<S, F> {
+    pub fn new(inner: S, map: F) -> Self {
+        Self { inner, map }
+    }
+}
+
+pub trait CustomSender<T>: Sized + Send + 'static {
     type Output<'a>: Future + Send
     where
         Self: 'a;
     fn send(&mut self, message: T) -> Self::Output<'_>;
-
-    fn map<I, F>(self, map: F) -> MapSender<Self, F>
-    where
-        F: Fn(I) -> T,
-    {
-        MapSender { inner: self, map }
-    }
 }
 
-#[derive(Clone)]
-pub struct MapSender<O, F> {
-    inner: O,
-    map: F,
-}
-
-impl<T: Clone + Send + 'static> SenderExt<T> for Sender<T> {
-    type Output<'a> = futures::sink::Send<'a, Self, T>;
-
-    fn send(&mut self, message: T) -> Self::Output<'_> {
-        SinkExt::send(self, message)
-    }
-}
-
-impl<T, R, O, F> SenderExt<T> for MapSender<O, F>
+impl<S, F, T, I> CustomSender<I> for MapSender<S, F>
 where
-    T: Clone + Send + 'static,
-    O: SenderExt<R> + Clone + Send + 'static,
-    F: Fn(T) -> R + Clone + Send + 'static,
+    I: Send + 'static,
+    S: Sink<T> + Send + Unpin + 'static,
+    F: Fn(I) -> T + Clone + Send + 'static,
+    T: Send,
 {
-    type Output<'a> = O::Output<'a>;
+    type Output<'a> = futures::sink::Send<'a, S, T>;
 
-    fn send(&mut self, message: T) -> Self::Output<'_> {
-        SenderExt::send(&mut self.inner, (self.map)(message))
+    fn send(&mut self, message: I) -> Self::Output<'_> {
+        SinkExt::send(&mut self.inner, (self.map)(message))
     }
 }
