@@ -1,22 +1,26 @@
-use crossterm::event::EventStream;
-use futures::{SinkExt, StreamExt};
+use futures::StreamExt;
+use futures::channel::mpsc::UnboundedSender;
 use iced::border::rounded;
 use iced::font::Weight;
 use iced::widget::{button, column, container, rich_text, row, scrollable, span, text};
 use iced::{Alignment, Element, Font, Length, Subscription, Task, Theme, never};
 use indexmap::IndexMap;
-use ipcv::{CustomSender, MapSender};
 use lucide_icons::Icon;
+use std::hash::Hash;
 use std::net::{IpAddr, Ipv4Addr};
-use tokio::sync::mpsc::UnboundedSender;
 
-use crate::{InterfaceMessage, ServerEvent, map_key};
+use crate::executor::CustomExecutor;
+use crate::{InterfaceMessage, ServerEvent};
 
-pub fn run() -> iced::Result {
-    iced::application(State::default, update, view_2)
+pub fn run(
+    gui_tx: UnboundedSender<InterfaceMessage>,
+    server_rx: flume::Receiver<ServerEvent>,
+) -> iced::Result {
+    iced::application(move || State::new(gui_tx.clone()), update, view_2)
         .fonts([lucide_icons::LUCIDE_FONT_BYTES])
         .title("IPCV Server GUI")
-        .subscription(subscription)
+        .subscription(move |state| subscription(state, server_rx.clone()))
+        .executor::<CustomExecutor>()
         .run()
 }
 
@@ -30,76 +34,76 @@ struct ClientState {
 struct State {
     server_status: String,
     clients: IndexMap<IpAddr, ClientState>,
-    gui_tx: Option<UnboundedSender<InterfaceMessage>>,
+    gui_tx: UnboundedSender<InterfaceMessage>,
 }
 
-impl Default for State {
-    fn default() -> Self {
+impl State {
+    fn new(gui_tx: UnboundedSender<InterfaceMessage>) -> Self {
         Self {
             server_status: Default::default(),
-            clients: [
-                (
-                    IpAddr::V4(Ipv4Addr::new(255, 0, 1, 2)),
-                    ClientState {
-                        host: "ciaoooo".to_owned(),
-                        last_frame: None,
-                        frame_number: 8,
-                        waiting: true,
-                    },
-                ),
-                (
-                    IpAddr::V4(Ipv4Addr::new(25, 0, 1, 2)),
-                    ClientState {
-                        host: "ciaooodddo".to_owned(),
-                        last_frame: None,
-                        frame_number: 69,
-                        waiting: true,
-                    },
-                ),
-                (
-                    IpAddr::V4(Ipv4Addr::new(5, 0, 1, 2)),
-                    ClientState {
-                        host: "ciaooodsdso".to_owned(),
-                        last_frame: None,
-                        frame_number: 81,
-                        waiting: true,
-                    },
-                ),
-                (
-                    IpAddr::V4(Ipv4Addr::new(25, 2, 1, 2)),
-                    ClientState {
-                        host: "ciaooodddo".to_owned(),
-                        last_frame: None,
-                        frame_number: 69,
-                        waiting: true,
-                    },
-                ),
-                (
-                    IpAddr::V4(Ipv4Addr::new(5, 4, 1, 2)),
-                    ClientState {
-                        host: "ciaooodsdso".to_owned(),
-                        last_frame: None,
-                        frame_number: 81,
-                        waiting: true,
-                    },
-                ),
-            ]
-            .into(),
-            gui_tx: Default::default(),
+            // clients: [
+            //     (
+            //         IpAddr::V4(Ipv4Addr::new(255, 0, 1, 2)),
+            //         ClientState {
+            //             host: "ciaoooo".to_owned(),
+            //             last_frame: None,
+            //             frame_number: 8,
+            //             waiting: true,
+            //         },
+            //     ),
+            //     (
+            //         IpAddr::V4(Ipv4Addr::new(25, 0, 1, 2)),
+            //         ClientState {
+            //             host: "ciaooodddo".to_owned(),
+            //             last_frame: None,
+            //             frame_number: 69,
+            //             waiting: true,
+            //         },
+            //     ),
+            //     (
+            //         IpAddr::V4(Ipv4Addr::new(5, 0, 1, 2)),
+            //         ClientState {
+            //             host: "ciaooodsdso".to_owned(),
+            //             last_frame: None,
+            //             frame_number: 81,
+            //             waiting: true,
+            //         },
+            //     ),
+            //     (
+            //         IpAddr::V4(Ipv4Addr::new(25, 2, 1, 2)),
+            //         ClientState {
+            //             host: "ciaooodddo".to_owned(),
+            //             last_frame: None,
+            //             frame_number: 69,
+            //             waiting: true,
+            //         },
+            //     ),
+            //     (
+            //         IpAddr::V4(Ipv4Addr::new(5, 4, 1, 2)),
+            //         ClientState {
+            //             host: "ciaooodsdso".to_owned(),
+            //             last_frame: None,
+            //             frame_number: 81,
+            //             waiting: true,
+            //         },
+            //     ),
+            // ]
+            // .into(),
+            clients: Default::default(),
+            gui_tx,
         }
     }
 }
 
 #[derive(Debug, Clone)]
-pub enum Message {
-    Ready(UnboundedSender<InterfaceMessage>),
-    ServerEvent(ServerEvent),
+enum Message {
+    Server(ServerEvent),
     Interface(InterfaceMessage),
 }
 
 fn update(state: &mut State, message: Message) -> Task<Message> {
     match message {
-        Message::ServerEvent(event) => match event {
+        Message::Server(event) => match event {
             ServerEvent::Stopped => {
                 return iced::exit();
             }
@@ -140,21 +144,12 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                 }
             }
         },
-        Message::Ready(tx) => {
-            state.server_status = "Server is running...".to_string();
-            state.gui_tx = Some(tx);
-        }
         Message::Interface(cmd) => {
-            match cmd {
-                InterfaceMessage::Move(from, to) => {
-                    state.clients.move_index(from, to);
-                }
-                _ => {}
+            if let InterfaceMessage::Move(from, to) = cmd {
+                state.clients.move_index(from, to);
             }
 
-            if let Some(tx) = &state.gui_tx {
-                let _ = tx.send(cmd);
-            }
+            let _ = state.gui_tx.unbounded_send(cmd);
         }
     }
 
@@ -303,37 +298,17 @@ fn view(state: &State) -> Element<'_, InterfaceMessage> {
         .into()
 }
 
-fn subscription(_state: &State) -> Subscription<Message> {
-    Subscription::run(|| {
-        iced::stream::channel(
-            100,
-            |mut output: futures::channel::mpsc::Sender<Message>| async move {
-                // gui_tx is sent back to the GUI state so UI interactions can send commands.
-                // gui_rx is passed into the background server loop so it can receive and process these commands.
-                let (gui_tx, gui_rx) = tokio::sync::mpsc::unbounded_channel();
-                let _ = output.send(Message::Ready(gui_tx.clone())).await;
+fn subscription(_state: &State, server_rx: flume::Receiver<ServerEvent>) -> Subscription<Message> {
+    struct Tmp(flume::Receiver<ServerEvent>);
 
-                let args = crate::ARGS.get().unwrap().clone();
+    impl Hash for Tmp {
+        fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+            0.hash(state);
+        }
+    }
 
-                if args.tui {
-                    tokio::spawn(async move {
-                        let mut events = EventStream::new();
-                        while let Some(Ok(event)) = events.next().await {
-                            if let crossterm::event::Event::Key(x) = event
-                                && let Some(x) = map_key(x)
-                                && gui_tx.send(x).is_err()
-                            {
-                                break;
-                            }
-                        }
-                    });
-                }
-
-                let mut output = MapSender::new(output, Message::ServerEvent);
-                let _ = crate::server_loop(args, &mut output, gui_rx).await;
-                let _ = output.send(ServerEvent::Stopped).await;
-            },
-        )
+    Subscription::run_with(Tmp(server_rx), |server_rx| {
+        server_rx.0.clone().into_stream().map(Message::Server)
     })
 }
 

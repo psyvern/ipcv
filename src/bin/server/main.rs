@@ -1,10 +1,13 @@
+mod executor;
 mod gui;
 
 use clap::Parser;
 use colored::Colorize;
+use crossterm::event::EventStream;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use futures::SinkExt;
 use futures::StreamExt;
+use futures::channel::mpsc::UnboundedReceiver;
 use image::{ImageBuffer, Rgb};
 use indexmap::IndexMap;
 use ipcv::CustomSender;
@@ -24,11 +27,10 @@ use std::io::Write;
 use std::net::Ipv4Addr;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use std::{fs::File, net::IpAddr, path::PathBuf};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::runtime::Runtime;
 use tokio::task::JoinSet;
 use tokio::{net::UdpSocket, select};
 use tokio_util::codec::FramedRead;
@@ -105,13 +107,13 @@ async fn connection_thread(
     token: CancellationToken,
     stream: TcpStream,
     mut socket: impl CustomSender<ServerMessage>,
-    mut output: impl CustomSender<ServerEvent>,
+    output: flume::Sender<ServerEvent>,
 ) -> std::io::Result<()> {
     let mut counter = 0u64;
 
     let mut reader = FramedRead::new(stream, ClientMessage::decoder());
 
-    let directory = settings.output.join(address.to_string());
+    let directory = settings.output.join(address.ip().to_string());
     let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir(&directory)?;
 
@@ -152,7 +154,7 @@ async fn connection_thread(
                             width: format.width(),
                             height: format.height(),
                             data,
-                        }).await;
+                        });
 
                         frame
                             .save(directory.join(format!("{counter:05}.png")))
@@ -176,7 +178,7 @@ async fn loop_iteration(
     join_set: &mut JoinSet<IpAddr>,
     data_socket: &Arc<UdpSocket>,
     listener: &mut TcpListener,
-    output: &mut (impl CustomSender<ServerEvent> + Clone),
+    output: &mut flume::Sender<ServerEvent>,
     gui_rx: &mut UnboundedReceiver<InterfaceMessage>,
 ) -> Option<bool> {
     let mut data_socket_2 = UdpFramed::new(
@@ -185,18 +187,18 @@ async fn loop_iteration(
     );
 
     select! {
-        Some(cmd) = gui_rx.recv() => {
+        Ok(cmd) = gui_rx.recv() => {
             match cmd {
                 InterfaceMessage::PrintClients => print_clients(clients),
                 InterfaceMessage::DisconnectClient(address) => {
                     if let Some(info) = clients.shift_remove(&address)
                         && let ClientStatus::Connected(token) = info.status {
-                            println!("Closing connection to `{}` via GUI", info.host);
+                            println!("Closing connection to `{}`", info.host);
                             let msg = ServerMessage::Close { force: false };
                             let _ = data_socket_2.send((msg, (address, info.port).into())).await;
                             token.cancel();
 
-                            let _ = output.send(ServerEvent::ClientDisconnected { address }).await;
+                            let _ = output.send(ServerEvent::ClientDisconnected { address });
                         }
                 }
                 InterfaceMessage::AcceptClient(address) => {
@@ -230,7 +232,7 @@ async fn loop_iteration(
                             });
                         }
 
-                        let _ = output.send(ServerEvent::ClientAccepted { address }).await;
+                        let _ = output.send(ServerEvent::ClientAccepted { address });
 
                         client.status = ClientStatus::Connected(token);
                     }
@@ -252,7 +254,7 @@ async fn loop_iteration(
                 let _ = output.send(ServerEvent::ClientConnected {
                     address,
                     host: host.to_owned(),
-                }).await;
+                });
 
                 println!(
                     "Added address {} as host {}",
@@ -285,7 +287,7 @@ async fn loop_iteration(
 
 pub async fn server_loop(
     args: Args,
-    output: &mut (impl CustomSender<ServerEvent> + Clone),
+    output: &mut flume::Sender<ServerEvent>,
     mut gui_rx: UnboundedReceiver<InterfaceMessage>,
 ) -> std::io::Result<()> {
     let stdin = std::io::stdin();
@@ -365,17 +367,39 @@ fn map_key(event: KeyEvent) -> Option<InterfaceMessage> {
     }
 }
 
-pub static ARGS: OnceLock<Args> = OnceLock::new();
-
 fn main() -> iced::Result {
     let args = Args::parse();
     println!("{args:?}");
 
-    ARGS.set(args.clone()).unwrap();
-
     std::fs::create_dir_all(&args.output).unwrap();
 
-    gui::run()
+    let (gui_tx, gui_rx) = futures::channel::mpsc::unbounded();
+    let (mut server_tx, server_rx) = flume::unbounded();
+
+    let runtime = Runtime::new().unwrap();
+
+    if args.tui {
+        let gui_tx = gui_tx.clone();
+        runtime.spawn(
+            EventStream::new()
+                .filter_map(|x| async move {
+                    match x {
+                        Ok(crossterm::event::Event::Key(x)) => map_key(x),
+                        _ => None,
+                    }
+                })
+                .map(Ok)
+                .forward(gui_tx),
+        );
+    }
+
+    runtime.spawn(async move {
+        let _ = server_loop(args, &mut server_tx, gui_rx).await;
+        let _ = server_tx.send(ServerEvent::Stopped);
+    });
+
+    let _guard = runtime.enter();
+    gui::run(gui_tx, server_rx)
 }
 
 #[derive(Debug, Clone)]
