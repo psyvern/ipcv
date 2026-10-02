@@ -21,6 +21,7 @@ pub fn run(
         .title("IPCV Server GUI")
         .subscription(move |state| subscription(state, server_rx.clone()))
         .executor::<CustomExecutor>()
+        .exit_on_close_request(false)
         .run()
 }
 
@@ -307,9 +308,13 @@ fn subscription(_state: &State, server_rx: flume::Receiver<ServerEvent>) -> Subs
         }
     }
 
-    Subscription::run_with(Tmp(server_rx), |server_rx| {
-        server_rx.0.clone().into_stream().map(Message::Server)
-    })
+    Subscription::batch([
+        iced::window::close_requests()
+            .map(|_| Message::Interface(InterfaceMessage::Shutdown { force: false })),
+        Subscription::run_with(Tmp(server_rx), |server_rx| {
+            server_rx.0.clone().into_stream().map(Message::Server)
+        }),
+    ])
 }
 
 trait IconToWidget {
