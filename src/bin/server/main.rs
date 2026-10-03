@@ -42,6 +42,10 @@ pub struct Args {
     /// Multicast group to join
     #[arg(long, short, default_value = "224.1.1.1")]
     group: IpAddr,
+    /// Local IPv4 interface to bind for multicast, use IP of the adapter connected to LAN.
+    /// Specific fix for Windows, otherwise leave as default.
+    #[arg(long, short = 'i', default_value = "0.0.0.0")]
+    interface: Ipv4Addr,
     /// Communication port (must be the same in clients)
     #[arg(long, short, default_value_t = 5007)]
     port: u16,
@@ -299,7 +303,7 @@ pub async fn server_loop(
 
     let socket = Arc::new(UdpSocket::bind((ipcv::unspecified_from(args.group), args.port)).await?);
     match args.group {
-        IpAddr::V4(address) => socket.join_multicast_v4(address, Ipv4Addr::UNSPECIFIED),
+        IpAddr::V4(address) => socket.join_multicast_v4(address, args.interface),
         IpAddr::V6(address) => socket.join_multicast_v6(&address, 0),
     }?;
 

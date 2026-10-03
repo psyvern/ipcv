@@ -127,6 +127,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             }
             ServerEvent::ClientDisconnected { address } => {
                 state.clients.shift_remove(&address);
+                state.server_status = format!("Client {} disconnected", address);
             }
             ServerEvent::FrameReceived {
                 address,
