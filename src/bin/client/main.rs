@@ -28,9 +28,6 @@ struct Args {
     /// Communication port (must be the same in the server)
     #[arg(long, short, default_value_t = 5007)]
     port: u16,
-    /// Listening port
-    #[arg(long, short)]
-    listening_port: Option<u16>,
     /// Delay between sending (in seconds)
     #[arg(long, short, default_value_t = 5.0)]
     update_delay: f64,
@@ -42,15 +39,16 @@ struct Args {
 async fn wait_for_server(
     group: IpAddr,
     port: u16,
-    listening_port: u16,
     camera_format: CameraFormat,
 ) -> std::io::Result<Option<(SocketAddr, Duration)>> {
     let output = UdpSocket::bind((ipcv::unspecified_from(group), 0)).await?;
     output.set_ttl(2)?;
     output.connect((group, port)).await?;
 
-    let input_socket = UdpSocket::bind((ipcv::unspecified_from(group), listening_port)).await?;
+    let input_socket = UdpSocket::bind((ipcv::unspecified_from(group), 0)).await?;
     // input_socket.set_timeout(5);
+
+    let listening_port = input_socket.local_addr()?.port();
 
     let initial_message = ClientInitialMessage {
         port: listening_port,
@@ -96,11 +94,10 @@ async fn wait_for_server(
 
 async fn client_thread(
     camera: &mut CallbackCamera,
-    port: u16,
     address: SocketAddr,
     time: Duration,
 ) -> std::io::Result<bool> {
-    let input = UdpSocket::bind((ipcv::unspecified_from(address.ip()), port)).await?;
+    let input = UdpSocket::bind((ipcv::unspecified_from(address.ip()), 0)).await?;
     let mut input = UdpFramed::new(input, ServerMessage::decoder());
     let mut output = FramedWrite::new(TcpStream::connect(address).await?, ClientMessage::encoder());
 
@@ -174,18 +171,16 @@ async fn run(args: Args, camera: &mut CallbackCamera) -> std::io::Result<()> {
         camera.info().human_name().yellow().bold()
     );
 
-    let listening_port = args.listening_port.unwrap_or(args.port);
-
     loop {
         let Some((address, delay)) =
-            wait_for_server(args.group, args.port, listening_port, camera_format).await?
+            wait_for_server(args.group, args.port, camera_format).await?
         else {
             break;
         };
 
         println!("Connected to {}", address.to_string().bright_green().bold());
 
-        let retry = client_thread(camera, listening_port, address, delay).await?;
+        let retry = client_thread(camera, address, delay).await?;
 
         if !retry {
             break;
