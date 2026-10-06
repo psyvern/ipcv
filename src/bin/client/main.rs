@@ -40,7 +40,7 @@ async fn wait_for_server(
     group: IpAddr,
     port: u16,
     camera_format: CameraFormat,
-) -> std::io::Result<Option<(SocketAddr, Duration)>> {
+) -> std::io::Result<Option<(SocketAddr, Duration, UdpSocket)>> {
     let output = UdpSocket::bind((ipcv::unspecified_from(group), 0)).await?;
     output.set_ttl(2)?;
     output.connect((group, port)).await?;
@@ -80,8 +80,19 @@ async fn wait_for_server(
             Ok((size, address)) = input_socket.recv_from(&mut data) => {
                 let address = address.ip();
 
-                if let Some(ServerMessage::Open { port, interval }) = ServerMessage::from_bytes(&data[..size]) {
-                    return Ok(Some((SocketAddr::new(address, port), interval)));
+                if let Some(msg) = ServerMessage::from_bytes(&data[..size]) {
+                    match msg {
+                        ServerMessage::Open { port, interval } => {
+                            return Ok(Some((SocketAddr::new(address, port), interval, input_socket)));
+                        }
+                        ServerMessage::Close { force } => {
+                            if force {
+                                println!("Connection denied by the server.");
+                                return Ok(None);
+                            }
+                        }
+                        _ => {}
+                    }
                 }
             }
 
@@ -96,9 +107,10 @@ async fn client_thread(
     camera: &mut CallbackCamera,
     address: SocketAddr,
     time: Duration,
+    // Reuse the socket from wait_for_server
+    input_socket: UdpSocket,
 ) -> std::io::Result<bool> {
-    let input = UdpSocket::bind((ipcv::unspecified_from(address.ip()), 0)).await?;
-    let mut input = UdpFramed::new(input, ServerMessage::decoder());
+    let mut input = UdpFramed::new(input_socket, ServerMessage::decoder());
     let mut output = FramedWrite::new(TcpStream::connect(address).await?, ClientMessage::encoder());
 
     let mut events = EventStream::new();
@@ -172,7 +184,7 @@ async fn run(args: Args, camera: &mut CallbackCamera) -> std::io::Result<()> {
     );
 
     loop {
-        let Some((address, delay)) =
+        let Some((address, delay, input_socket)) =
             wait_for_server(args.group, args.port, camera_format).await?
         else {
             break;
@@ -180,7 +192,7 @@ async fn run(args: Args, camera: &mut CallbackCamera) -> std::io::Result<()> {
 
         println!("Connected to {}", address.to_string().bright_green().bold());
 
-        let retry = client_thread(camera, address, delay).await?;
+        let retry = client_thread(camera, address, delay, input_socket).await?;
 
         if !retry {
             break;

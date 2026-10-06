@@ -126,8 +126,15 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                 }
             }
             ServerEvent::ClientDisconnected { address } => {
-                state.clients.shift_remove(&address);
-                state.server_status = format!("Client {} disconnected", address);
+                if let Some(client) = state.clients.get_mut(&address) {
+                    state.server_status = format!("Client {} disconnected", address);
+                    client.waiting = true;
+                }
+            }
+            ServerEvent::ClientDenied { address } => {
+                if let Some(_client) = state.clients.shift_remove(&address) {
+                    state.server_status = format!("Client {} removed", address);
+                }
             }
             ServerEvent::FrameReceived {
                 address,
@@ -243,7 +250,7 @@ fn view(state: &State) -> Element<'_, InterfaceMessage> {
                         .on_press(InterfaceMessage::AcceptClient(address)),
                     button(row![Icon::Unplug.widget(), "Deny"].spacing(4))
                         .style(iced::widget::button::danger)
-                        .on_press(InterfaceMessage::DisconnectClient(address)),
+                        .on_press(InterfaceMessage::DenyClient(address)),
                 ]
             } else {
                 row![

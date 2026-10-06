@@ -179,6 +179,7 @@ async fn connection_thread(
 async fn loop_iteration(
     settings: &Args,
     clients: &mut IndexMap<IpAddr, ClientInfo>,
+    recently_denied: &mut std::collections::HashMap<IpAddr, std::time::Instant>,
     join_set: &mut JoinSet<IpAddr>,
     data_socket: &Arc<UdpSocket>,
     listener: &mut TcpListener,
@@ -195,15 +196,25 @@ async fn loop_iteration(
             match cmd {
                 InterfaceMessage::PrintClients => print_clients(clients),
                 InterfaceMessage::DisconnectClient(address) => {
-                    if let Some(info) = clients.shift_remove(&address)
-                        && let ClientStatus::Connected(token) = info.status {
-                            println!("Closing connection to `{}`", info.host);
+                    if let Some(client) = clients.get_mut(&address)
+                        && let ClientStatus::Connected(token) = &client.status {
+                            println!("Closing connection to `{}`", client.host);
                             let msg = ServerMessage::Close { force: false };
-                            let _ = data_socket_2.send((msg, (address, info.port).into())).await;
+                            let _ = data_socket_2.send((msg, (address, client.port).into())).await;
                             token.cancel();
+
+                            client.status = ClientStatus::Waiting;
 
                             let _ = output.send(ServerEvent::ClientDisconnected { address });
                         }
+                }
+                InterfaceMessage::DenyClient(address) => {
+                    if let Some (client) = clients.shift_remove(&address){
+                        let msg = ServerMessage::Close { force: true };
+                        let _ = data_socket_2.send((msg, (address, client.port).into())).await;
+                        recently_denied.insert(address, std::time::Instant::now());
+                        let _ = output.send(ServerEvent::ClientDenied { address });
+                    }
                 }
                 InterfaceMessage::AcceptClient(address) => {
                     if let Some(client) = clients.get_mut(&address) {
@@ -255,6 +266,16 @@ async fn loop_iteration(
             let address = address.ip();
 
             if !clients.contains_key(&address) {
+                if let Some(&deny_time) = recently_denied.get(&address) {
+                    if deny_time.elapsed() < std::time::Duration::from_secs(10) {
+                        let msg = ServerMessage::Close { force: true };
+                        let _ = data_socket_2.send((msg, (address, port).into())).await;
+                        return None;
+                    } else {
+                        recently_denied.remove(&address);
+                    }
+                }
+
                 let _ = output.send(ServerEvent::ClientConnected {
                     address,
                     host: host.to_owned(),
@@ -308,6 +329,7 @@ pub async fn server_loop(
     }?;
 
     let mut clients = IndexMap::new();
+    let mut recently_denied = std::collections::HashMap::new();
     let mut join_set = JoinSet::new();
     let mut listener =
         TcpListener::bind((ipcv::unspecified_from(args.group), args.tcp_port)).await?;
@@ -318,6 +340,7 @@ pub async fn server_loop(
         let force = loop_iteration(
             &args,
             &mut clients,
+            &mut recently_denied,
             &mut join_set,
             &socket,
             &mut listener,
@@ -419,6 +442,9 @@ pub enum ServerEvent {
     ClientDisconnected {
         address: IpAddr,
     },
+    ClientDenied {
+        address: IpAddr,
+    },
     FrameReceived {
         address: IpAddr,
         frame_number: u64,
@@ -433,6 +459,7 @@ pub enum InterfaceMessage {
     PrintClients,
     AcceptClient(IpAddr),
     DisconnectClient(IpAddr),
+    DenyClient(IpAddr),
     OpenFolder(IpAddr),
     Shutdown { force: bool },
     Move(usize, usize),
