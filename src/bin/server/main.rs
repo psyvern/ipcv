@@ -421,8 +421,14 @@ fn main() -> iced::Result {
     }
 
     runtime.spawn(async move {
-        let _ = server_loop(args, &mut server_tx, gui_rx).await;
-        let _ = server_tx.send(ServerEvent::Stopped);
+        let s_result = server_loop(args, &mut server_tx, gui_rx).await;
+        if let Err(e) = s_result {
+            eprintln!("Server error: {}",e);
+        }
+        let ms_err = server_tx.send(ServerEvent::Stopped);
+        if let Err(ms_err) = ms_err{
+            eprintln!("Close Server Event message send errro: {}",ms_err);
+        }
     });
 
     let _guard = runtime.enter();
