@@ -218,17 +218,35 @@ async fn loop_iteration(
                 }
                 InterfaceMessage::AcceptClient(address) => {
                     if let Some(client) = clients.get_mut(&address) {
-                        data_socket_2.send((
+                        if let Err(e) = data_socket_2.send((
                             ServerMessage::Open { port: settings.tcp_port, interval: settings.update_interval },
                             (address, client.port).into(),
-                        )).await.unwrap();
+                        )).await {
+                            eprintln!("Cannot send Open to {address}: {e}");
+                            return None;
+                        }
 
                         let token = CancellationToken::new();
 
                         {
                             let settings = settings.clone();
                             let token = token.clone();
-                            let (stream, _) = listener.accept().await.unwrap();
+
+                            
+                            let stream = match tokio::time::timeout(Duration::from_secs(5), listener.accept()).await {
+                                Ok(Ok((stream, _))) => stream,
+                                Ok(Err(e)) => {
+                                    eprintln!("Accept failed: {e}");
+                                    return None;
+                                }
+                                Err(_) => {
+                                    eprintln!("Client {address} did not connect, removing it");
+                                    clients.shift_remove(&address);
+                                    let _ = output.send(ServerEvent::ClientDenied { address });
+                                    return None;
+                                }
+                            };
+
                             let socket = data_socket.clone();
                             let output = output.clone();
                             let format = client.format;
@@ -254,7 +272,9 @@ async fn loop_iteration(
                 }
                 InterfaceMessage::OpenFolder(address) => {
                     let path = settings.output.join(address.to_string());
-                    open::that_detached(path).unwrap();
+                    if let Err(e) = open::that_detached(path) {
+                        eprintln!("Cannot open folder: {e}");
+                    }
                 }
                 InterfaceMessage::Move(_, _) => {}
                 InterfaceMessage::Shutdown { force } => {
