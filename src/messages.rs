@@ -1,6 +1,7 @@
 use std::{marker::PhantomData, time::Duration};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use iced::wgpu::naga::compact::KeepUnused::No;
 use itertools::Itertools;
 use nokhwa::utils::{CameraFormat, FrameFormat};
 use tokio_util::codec::{Decoder, Encoder};
@@ -100,10 +101,11 @@ impl Encode for ServerMessage {
 
 impl Decode for ServerMessage {
     fn decode(src: &mut bytes::BytesMut) -> Option<Self> {
+        let src = &mut src.split();
         Some(match src.try_get_u8().ok()? {
             0 => {
                 let port = src.try_get_u16().ok()?;
-                let interval = Duration::from_secs_f64(src.try_get_f64().ok()?);
+                let interval = Duration::try_from_secs_f64(src.try_get_f64().ok()?).ok()?;  
 
                 Self::Open { port, interval }
             }
@@ -113,10 +115,10 @@ impl Decode for ServerMessage {
             }
             2 => Self::Heartbeat,
             3 => {
-                let interval = Duration::from_secs_f64(src.try_get_f64().ok()?);
+                let interval = Duration::try_from_secs_f64(src.try_get_f64().ok()?).ok()?;
                 Self::UpdateInterval(interval)
             }
-            x => panic!("Received unknown message type: {x}"),
+            x => return None,
         })
     }
 }
@@ -142,6 +144,7 @@ impl Encode for ClientMessage {
 
 impl Decode for ClientMessage {
     fn decode(src: &mut bytes::BytesMut) -> Option<Self> {
+        
         let result = match src.first()? {
             0 => {
                 let data = src.get(1..5)?;
@@ -193,6 +196,7 @@ impl Encode for ClientInitialMessage {
 
 impl Decode for ClientInitialMessage {
     fn decode(src: &mut bytes::BytesMut) -> Option<Self> {
+        let src = &mut src.split();
         let data = src.strip_prefix(b"open ")?;
 
         let mut data = data.iter().copied();
@@ -207,11 +211,9 @@ impl Decode for ClientInitialMessage {
             3 => FrameFormat::GRAY,
             4 => FrameFormat::RAWRGB,
             5 => FrameFormat::RAWBGR,
-            x => panic!("Unknown frame format: {x}"),
+            _ => return None,
         };
         let host = String::from_utf8(data.collect()).ok()?;
-
-        src.clear();
 
         Some(Self {
             port,
