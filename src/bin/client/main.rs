@@ -111,8 +111,14 @@ async fn client_thread(
     input_socket: UdpSocket,
 ) -> std::io::Result<bool> {
     let mut input = UdpFramed::new(input_socket, ServerMessage::decoder());
-    let mut output = FramedWrite::new(TcpStream::connect(address).await?, ClientMessage::encoder());
-
+    let stream = match TcpStream::connect(address).await {
+        Ok(stream) => stream,
+        Err(e) => {
+            println!("Cannot connect to {address} ({e}), waiting again...");
+            return Ok(true);
+        }
+    };
+    let mut output = FramedWrite::new(stream, ClientMessage::encoder());
     let mut events = EventStream::new();
     let mut counter = 0;
 
@@ -127,7 +133,10 @@ async fn client_thread(
                 if let Ok(frame) = frame {
                     let bytes = frame.buffer_bytes();
 
-                    let _ = output.send(ClientMessage::Frame(bytes)).await;
+                    if let Err(e) = output.send(ClientMessage::Frame(bytes)).await {
+                        println!("Cannot send frame ({e}), detaching...");
+                        break true;
+                    }
 
                     // socket.send(counter.to_string().into_bytes());
                     println!("Sending frame: {}", counter.to_string().bright_cyan().bold());
