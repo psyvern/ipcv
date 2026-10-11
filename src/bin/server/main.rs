@@ -322,6 +322,7 @@ async fn loop_iteration(
                     println!(
                         "Removed address {} from clients", address.to_string().bright_green().bold(),
                     );
+                    let _ = output.send(ServerEvent::ClientDenied { address });  
                 }
         }
         else => return None,
