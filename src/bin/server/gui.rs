@@ -7,7 +7,7 @@ use iced::{Alignment, Element, Font, Length, Subscription, Task, Theme, never};
 use indexmap::IndexMap;
 use lucide_icons::Icon;
 use std::hash::Hash;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::IpAddr;
 
 use crate::executor::CustomExecutor;
 use crate::{InterfaceMessage, ServerEvent};
@@ -35,6 +35,7 @@ struct ClientState {
 struct State {
     server_status: String,
     clients: IndexMap<IpAddr, ClientState>,
+    denied: IndexMap<IpAddr, String>,
     gui_tx: UnboundedSender<InterfaceMessage>,
 }
 
@@ -91,6 +92,7 @@ impl State {
             // ]
             // .into(),
             clients: Default::default(),
+            denied: IndexMap::default(),
             gui_tx,
         }
     }
@@ -156,6 +158,16 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::Interface(cmd) => {
             if let InterfaceMessage::Move(from, to) = cmd {
                 state.clients.move_index(from, to);
+            }
+
+            if let InterfaceMessage::DenyClient(address) = cmd
+                && let Some(client) = state.clients.get(&address)
+            {
+                state.denied.insert(address, client.host.clone());
+            }
+
+            if let InterfaceMessage::AllowClient(address) = cmd {
+                state.denied.shift_remove(&address);
             }
 
             let _ = state.gui_tx.unbounded_send(cmd);
@@ -298,7 +310,26 @@ fn view(state: &State) -> Element<'_, InterfaceMessage> {
         scrollable::Direction::Vertical(scrollable::Scrollbar::new().spacing(8)),
     );
 
-    let content = column![header, scrollable_clients].spacing(40);
+    let mut content = column![header, scrollable_clients.height(Length::Fill)].spacing(40);
+
+    if !state.denied.is_empty() {
+        let mut denied_list = column![text("Denied clients").size(20)].spacing(8);
+
+        for (&address, host) in &state.denied {
+            denied_list = denied_list.push(
+                row![
+                    text(host).width(200),
+                    text(address.to_string()).width(150),
+                    button("Allow")
+                        .style(iced::widget::button::success)
+                        .on_press(InterfaceMessage::AllowClient(address)),
+                ]
+                .spacing(16)
+                .align_y(Alignment::Center),
+            );
+        }
+        content = content.push(denied_list);
+    }
 
     container(content)
         .padding(20)

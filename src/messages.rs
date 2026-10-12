@@ -1,7 +1,7 @@
 use std::{marker::PhantomData, time::Duration};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use iced::wgpu::naga::compact::KeepUnused::No;
+
 use itertools::Itertools;
 use nokhwa::utils::{CameraFormat, FrameFormat};
 use tokio_util::codec::{Decoder, Encoder};
@@ -79,6 +79,7 @@ pub enum ServerMessage {
     UpdateInterval(Duration),
     /// Message to keep the connection alive
     Heartbeat,
+    Allow,
 }
 
 impl Encode for ServerMessage {
@@ -95,6 +96,9 @@ impl Encode for ServerMessage {
                 dst.put_u8(3);
                 dst.extend(interval.as_secs_f64().to_be_bytes());
             }
+            Self::Allow => {
+                dst.put_u8(4);
+            }
         }
     }
 }
@@ -105,7 +109,7 @@ impl Decode for ServerMessage {
         Some(match src.try_get_u8().ok()? {
             0 => {
                 let port = src.try_get_u16().ok()?;
-                let interval = Duration::try_from_secs_f64(src.try_get_f64().ok()?).ok()?;  
+                let interval = Duration::try_from_secs_f64(src.try_get_f64().ok()?).ok()?;
 
                 Self::Open { port, interval }
             }
@@ -118,7 +122,8 @@ impl Decode for ServerMessage {
                 let interval = Duration::try_from_secs_f64(src.try_get_f64().ok()?).ok()?;
                 Self::UpdateInterval(interval)
             }
-            x => return None,
+            4 => Self::Allow,
+            _ => return None,
         })
     }
 }
@@ -144,7 +149,6 @@ impl Encode for ClientMessage {
 
 impl Decode for ClientMessage {
     fn decode(src: &mut bytes::BytesMut) -> Option<Self> {
-        
         let result = match src.first()? {
             0 => {
                 let data = src.get(1..5)?;

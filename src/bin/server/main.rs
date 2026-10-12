@@ -179,7 +179,7 @@ async fn connection_thread(
 async fn loop_iteration(
     settings: &Args,
     clients: &mut IndexMap<IpAddr, ClientInfo>,
-    recently_denied: &mut std::collections::HashMap<IpAddr, std::time::Instant>,
+    recently_denied: &mut std::collections::HashMap<IpAddr, u16>,
     join_set: &mut JoinSet<IpAddr>,
     data_socket: &Arc<UdpSocket>,
     listener: &mut TcpListener,
@@ -208,11 +208,16 @@ async fn loop_iteration(
                             let _ = output.send(ServerEvent::ClientDisconnected { address });
                         }
                 }
+                InterfaceMessage::AllowClient(address) => {
+                    if let Some(port) = recently_denied.remove(&address) {
+                        let _ = data_socket_2.send((ServerMessage::Allow, (address, port).into())).await;
+                    }
+                }
                 InterfaceMessage::DenyClient(address) => {
                     if let Some (client) = clients.shift_remove(&address){
                         let msg = ServerMessage::Close { force: true };
                         let _ = data_socket_2.send((msg, (address, client.port).into())).await;
-                        recently_denied.insert(address, std::time::Instant::now());
+                        recently_denied.insert(address, client.port);
                         let _ = output.send(ServerEvent::ClientDenied { address });
                     }
                 }
@@ -227,12 +232,12 @@ async fn loop_iteration(
                         }
 
                         let token = CancellationToken::new();
-
                         {
+                            //let mut denied = false;
                             let settings = settings.clone();
                             let token = token.clone();
 
-                            
+
                             let stream = match tokio::time::timeout(Duration::from_secs(5), listener.accept()).await {
                                 Ok(Ok((stream, _))) => stream,
                                 Ok(Err(e)) => {
@@ -286,16 +291,12 @@ async fn loop_iteration(
             let address = address.ip();
 
             if !clients.contains_key(&address) {
-                if let Some(&deny_time) = recently_denied.get(&address) {
-                    if deny_time.elapsed() < std::time::Duration::from_secs(10) {
-                        let msg = ServerMessage::Close { force: true };
-                        let _ = data_socket_2.send((msg, (address, port).into())).await;
-                        return None;
-                    } else {
-                        recently_denied.remove(&address);
-                    }
+                if let Some(denied_port) = recently_denied.get_mut(&address) {
+                    *denied_port = port;
+                    let msg = ServerMessage::Close { force: true };
+                    let _ = data_socket_2.send((msg, (address, port).into())).await;
+                    return None;
                 }
-
                 let _ = output.send(ServerEvent::ClientConnected {
                     address,
                     host: host.to_owned(),
@@ -322,7 +323,7 @@ async fn loop_iteration(
                     println!(
                         "Removed address {} from clients", address.to_string().bright_green().bold(),
                     );
-                    let _ = output.send(ServerEvent::ClientDenied { address });  
+                    let _ = output.send(ServerEvent::ClientDenied { address });
                 }
         }
         else => return None,
@@ -444,11 +445,11 @@ fn main() -> iced::Result {
     runtime.spawn(async move {
         let s_result = server_loop(args, &mut server_tx, gui_rx).await;
         if let Err(e) = s_result {
-            eprintln!("Server error: {}",e);
+            eprintln!("Server error: {}", e);
         }
         let ms_err = server_tx.send(ServerEvent::Stopped);
-        if let Err(ms_err) = ms_err{
-            eprintln!("Close Server Event message send errro: {}",ms_err);
+        if let Err(ms_err) = ms_err {
+            eprintln!("Close Server Event message send errro: {}", ms_err);
         }
     });
 
@@ -486,6 +487,7 @@ pub enum InterfaceMessage {
     PrintClients,
     AcceptClient(IpAddr),
     DisconnectClient(IpAddr),
+    AllowClient(IpAddr),
     DenyClient(IpAddr),
     OpenFolder(IpAddr),
     Shutdown { force: bool },

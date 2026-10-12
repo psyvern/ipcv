@@ -34,16 +34,16 @@ struct Args {
     /// Log additional data
     #[arg(long, short)]
     debug: bool,
-    //optional name 
-    #[arg(long,short)]
-    client_name: Option<String>
+    //optional name
+    #[arg(long, short)]
+    client_name: Option<String>,
 }
 
 async fn wait_for_server(
     group: IpAddr,
     port: u16,
     camera_format: CameraFormat,
-    name: Option<&str>
+    name: Option<&str>,
 ) -> std::io::Result<Option<(SocketAddr, Duration, UdpSocket)>> {
     let output = UdpSocket::bind((ipcv::unspecified_from(group), 0)).await?;
     output.set_ttl(2)?;
@@ -57,19 +57,22 @@ async fn wait_for_server(
     let initial_message = ClientInitialMessage {
         port: listening_port,
         format: camera_format,
-        host:  match name {
+        host: match name {
             Some(n) => n.to_owned(),
             None => hostname::get()?.to_string_lossy().into_owned(),
-        }
+        },
     }
     .into_bytes();
 
     let mut events = EventStream::new();
     let mut data = [0u8; 4096];
 
-    loop {
-        output.send(&initial_message).await?;
+    let mut denied = false;
 
+    loop {
+        if !denied {
+            output.send(&initial_message).await?;
+        }
         let event = events.next().fuse();
 
         select! {
@@ -95,9 +98,13 @@ async fn wait_for_server(
                         ServerMessage::Close { force } => {
                             if force {
                                 println!("Connection denied by the server.");
-                                return Ok(None);
+                                denied = true;
                             }
-                        }
+                        },
+                        ServerMessage::Allow => {
+                          println!("Allowed again by the server");
+                          denied = false;
+                        },
                         _ => {}
                     }
                 }
@@ -185,7 +192,8 @@ async fn client_thread(
                         interval = tokio::time::interval(x);
                         heartbeat = tokio::time::interval(x * 10);
                         heartbeat.tick().await;
-                    }
+                    },
+                    ServerMessage::Allow => {}
                 }
             }
         }
@@ -200,8 +208,13 @@ async fn run(args: Args, camera: &mut CallbackCamera) -> std::io::Result<()> {
     );
 
     loop {
-        let Some((address, delay, input_socket)) =
-            wait_for_server(args.group, args.port, camera_format,args.client_name.as_deref()).await?
+        let Some((address, delay, input_socket)) = wait_for_server(
+            args.group,
+            args.port,
+            camera_format,
+            args.client_name.as_deref(),
+        )
+        .await?
         else {
             break;
         };
