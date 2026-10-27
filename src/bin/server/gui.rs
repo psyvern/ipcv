@@ -322,7 +322,7 @@ fn view(state: &State) -> Element<'_, InterfaceMessage> {
     let mut content = column![header, scrollable_clients.height(Length::Fill)].spacing(40);
 
     if !state.denied.is_empty() {
- const DENIED_ROW_HEIGHT: f32 = 32.0;
+        const DENIED_ROW_HEIGHT: f32 = 32.0;
         const DENIED_SPACING: f32 = 8.0;
         const DENIED_VISIBLE: usize = 2;
         const DENIED_ITEM_WIDTH: f32 = 460.0;
@@ -330,7 +330,6 @@ fn view(state: &State) -> Element<'_, InterfaceMessage> {
         const DENIED_MAX_COLUMNS: usize = 3;
 
         let denied_grid = responsive(move |size| {
-            // As many columns as fit in the available width, between 1 and DENIED_MAX_COLUMNS
             let columns = (((size.width + DENIED_COLUMN_SPACING)
                 / (DENIED_ITEM_WIDTH + DENIED_COLUMN_SPACING)) as usize)
                 .clamp(1, DENIED_MAX_COLUMNS)
@@ -361,7 +360,6 @@ fn view(state: &State) -> Element<'_, InterfaceMessage> {
                 lines = lines.push(line);
             }
 
-            // Fit at most DENIED_VISIBLE lines; the rest scroll
             let visible = entries.len().div_ceil(columns).min(DENIED_VISIBLE) as f32;
             let height = visible * DENIED_ROW_HEIGHT + (visible - 1.0) * DENIED_SPACING;
 
