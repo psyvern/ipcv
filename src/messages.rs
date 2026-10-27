@@ -1,7 +1,6 @@
 use std::{marker::PhantomData, time::Duration};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-
 use itertools::Itertools;
 use nokhwa::utils::{CameraFormat, FrameFormat};
 use tokio_util::codec::{Decoder, Encoder};
