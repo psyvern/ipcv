@@ -1,7 +1,6 @@
 use std::{marker::PhantomData, time::Duration};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use iced::wgpu::naga::compact::KeepUnused::No;
 use itertools::Itertools;
 use nokhwa::utils::{CameraFormat, FrameFormat};
 use tokio_util::codec::{Decoder, Encoder};
@@ -105,7 +104,7 @@ impl Decode for ServerMessage {
         Some(match src.try_get_u8().ok()? {
             0 => {
                 let port = src.try_get_u16().ok()?;
-                let interval = Duration::try_from_secs_f64(src.try_get_f64().ok()?).ok()?;  
+                let interval = Duration::try_from_secs_f64(src.try_get_f64().ok()?).ok()?;
 
                 Self::Open { port, interval }
             }
@@ -144,7 +143,6 @@ impl Encode for ClientMessage {
 
 impl Decode for ClientMessage {
     fn decode(src: &mut bytes::BytesMut) -> Option<Self> {
-        
         let result = match src.first()? {
             0 => {
                 let data = src.get(1..5)?;

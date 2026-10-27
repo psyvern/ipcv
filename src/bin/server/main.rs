@@ -232,7 +232,7 @@ async fn loop_iteration(
                             let settings = settings.clone();
                             let token = token.clone();
 
-                            
+
                             let stream = match tokio::time::timeout(Duration::from_secs(5), listener.accept()).await {
                                 Ok(Ok((stream, _))) => stream,
                                 Ok(Err(e)) => {
@@ -322,7 +322,7 @@ async fn loop_iteration(
                     println!(
                         "Removed address {} from clients", address.to_string().bright_green().bold(),
                     );
-                    let _ = output.send(ServerEvent::ClientDenied { address });  
+                    let _ = output.send(ServerEvent::ClientDenied { address });
                 }
         }
         else => return None,
@@ -444,11 +444,11 @@ fn main() -> iced::Result {
     runtime.spawn(async move {
         let s_result = server_loop(args, &mut server_tx, gui_rx).await;
         if let Err(e) = s_result {
-            eprintln!("Server error: {}",e);
+            eprintln!("Server error: {}", e);
         }
         let ms_err = server_tx.send(ServerEvent::Stopped);
-        if let Err(ms_err) = ms_err{
-            eprintln!("Close Server Event message send errro: {}",ms_err);
+        if let Err(ms_err) = ms_err {
+            eprintln!("Close Server Event message send errro: {}", ms_err);
         }
     });
 

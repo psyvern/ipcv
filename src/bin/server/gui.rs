@@ -2,12 +2,13 @@ use futures::StreamExt;
 use futures::channel::mpsc::UnboundedSender;
 use iced::border::rounded;
 use iced::font::Weight;
+use iced::widget::image::Allocation;
 use iced::widget::{button, column, container, rich_text, row, scrollable, span, text};
 use iced::{Alignment, Element, Font, Length, Subscription, Task, Theme, never};
 use indexmap::IndexMap;
 use lucide_icons::Icon;
 use std::hash::Hash;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::IpAddr;
 
 use crate::executor::CustomExecutor;
 use crate::{InterfaceMessage, ServerEvent};
@@ -27,7 +28,7 @@ pub fn run(
 
 struct ClientState {
     host: String,
-    last_frame: Option<iced::widget::image::Handle>,
+    last_frame: Option<Allocation>,
     frame_number: u64,
     waiting: bool,
 }
@@ -100,6 +101,7 @@ impl State {
 enum Message {
     Server(ServerEvent),
     Interface(InterfaceMessage),
+    ThumbnailAllocated(IpAddr, Result<Allocation, iced::widget::image::Error>),
 }
 
 fn update(state: &mut State, message: Message) -> Task<Message> {
@@ -148,9 +150,11 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                 let handle = iced::widget::image::Handle::from_rgba(width, height, data);
 
                 if let Some(client) = state.clients.get_mut(&address) {
-                    client.last_frame = Some(handle);
                     client.frame_number = frame_number;
                 }
+
+                return iced::widget::image::allocate(handle)
+                    .map(move |x| Message::ThumbnailAllocated(address, x));
             }
         },
         Message::Interface(cmd) => {
@@ -159,6 +163,11 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             }
 
             let _ = state.gui_tx.unbounded_send(cmd);
+        }
+        Message::ThumbnailAllocated(address, allocation) => {
+            if let Some(client) = state.clients.get_mut(&address) {
+                client.last_frame = allocation.ok();
+            }
         }
     }
 
@@ -192,8 +201,8 @@ fn view(state: &State) -> Element<'_, InterfaceMessage> {
                     .align_x(Alignment::Center),
                 )
             } else {
-                if let Some(handle) = &client.last_frame {
-                    Element::new(iced::widget::image(handle.clone()).border_radius(8))
+                if let Some(frame) = &client.last_frame {
+                    Element::new(iced::widget::image(frame.handle()).border_radius(8))
                 } else {
                     Element::new(
                         column![
