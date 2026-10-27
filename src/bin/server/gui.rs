@@ -3,7 +3,7 @@ use futures::channel::mpsc::UnboundedSender;
 use iced::border::rounded;
 use iced::font::Weight;
 use iced::widget::image::Allocation;
-use iced::widget::{button, column, container, rich_text, row, scrollable, span, text};
+use iced::widget::{button, column, container, rich_text, row, scrollable, span, text, responsive};
 use iced::{Alignment, Element, Font, Length, Subscription, Task, Theme, never};
 use indexmap::IndexMap;
 use lucide_icons::Icon;
@@ -322,22 +322,63 @@ fn view(state: &State) -> Element<'_, InterfaceMessage> {
     let mut content = column![header, scrollable_clients.height(Length::Fill)].spacing(40);
 
     if !state.denied.is_empty() {
-        let mut denied_list = column![text("Denied clients").size(20)].spacing(8);
+ const DENIED_ROW_HEIGHT: f32 = 32.0;
+        const DENIED_SPACING: f32 = 8.0;
+        const DENIED_VISIBLE: usize = 2;
+        const DENIED_ITEM_WIDTH: f32 = 460.0;
+        const DENIED_COLUMN_SPACING: f32 = 24.0;
+        const DENIED_MAX_COLUMNS: usize = 3;
 
-        for (&address, host) in &state.denied {
-            denied_list = denied_list.push(
-                row![
-                    text(host).width(200),
-                    text(address.to_string()).width(150),
-                    button("Allow")
-                        .style(iced::widget::button::success)
-                        .on_press(InterfaceMessage::AllowClient(address)),
-                ]
-                .spacing(16)
-                .align_y(Alignment::Center),
-            );
-        }
-        content = content.push(denied_list);
+        let denied_grid = responsive(move |size| {
+            // As many columns as fit in the available width, between 1 and DENIED_MAX_COLUMNS
+            let columns = (((size.width + DENIED_COLUMN_SPACING)
+                / (DENIED_ITEM_WIDTH + DENIED_COLUMN_SPACING)) as usize)
+                .clamp(1, DENIED_MAX_COLUMNS)
+                .min(state.denied.len());
+
+            let entries: Vec<_> = state.denied.iter().collect();
+            let mut lines = column![].spacing(DENIED_SPACING);
+
+            for chunk in entries.chunks(columns) {
+                let mut line = row![].spacing(DENIED_COLUMN_SPACING);
+
+                for &(&address, host) in chunk {
+                    line = line.push(
+                        row![
+                            text(host).width(200),
+                            text(address.to_string()).width(150),
+                            button("Allow")
+                                .style(iced::widget::button::success)
+                                .on_press(InterfaceMessage::AllowClient(address)),
+                        ]
+                        .spacing(16)
+                        .width(DENIED_ITEM_WIDTH)
+                        .height(DENIED_ROW_HEIGHT)
+                        .align_y(Alignment::Center),
+                    );
+                }
+
+                lines = lines.push(line);
+            }
+
+            // Fit at most DENIED_VISIBLE lines; the rest scroll
+            let visible = entries.len().div_ceil(columns).min(DENIED_VISIBLE) as f32;
+            let height = visible * DENIED_ROW_HEIGHT + (visible - 1.0) * DENIED_SPACING;
+
+            container(
+                iced::widget::Scrollable::with_direction(
+                    lines,
+                    scrollable::Direction::Vertical(scrollable::Scrollbar::new().spacing(8)),
+                )
+                .height(height),
+            )
+            .center_x(Length::Fill)
+        })
+        .height(Length::Shrink);
+
+        let denied_list = column![text("Denied clients").size(20), denied_grid].spacing(8);
+
+        content = content.push(denied_list);    
     }
 
     container(content)
