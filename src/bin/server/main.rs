@@ -20,6 +20,7 @@ use ipcv::messages::CustomCodec;
 use ipcv::messages::Decode;
 use ipcv::messages::Encode;
 use ipcv::messages::ServerMessage;
+use jiff::Timestamp;
 use nokhwa::FormatDecoder;
 use nokhwa::pixel_format::RgbFormat;
 use nokhwa::utils::CameraFormat;
@@ -104,9 +105,14 @@ fn print_clients(clients: &IndexMap<IpAddr, ClientInfo>) {
     println!();
 }
 
-async fn connection_thread(
+struct ClientData {
     format: CameraFormat,
     address: SocketAddr,
+    name: String,
+}
+
+async fn connection_thread(
+    client: ClientData,
     settings: Args,
     token: CancellationToken,
     stream: TcpStream,
@@ -117,7 +123,11 @@ async fn connection_thread(
 
     let mut reader = FramedRead::new(stream, ClientMessage::decoder());
 
-    let directory = settings.output.join(address.ip().to_string());
+    let directory = settings.output.join(format!(
+        "{:?} - {}",
+        Timestamp::now().as_second(),
+        client.name
+    ));
     let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir(&directory)?;
 
@@ -147,23 +157,23 @@ async fn connection_thread(
                 match amount {
                     ClientMessage::Close => break,
                     ClientMessage::Frame(bytes) => {
-                        let bytes = RgbFormat::write_output(format.format(), format.resolution(), &bytes).unwrap();
-                        let frame = ImageBuffer::<Rgb<u8>, _>::from_vec(format.width(), format.height(), bytes).unwrap();
+                        let bytes = RgbFormat::write_output(client.format.format(), client.format.resolution(), &bytes).unwrap();
+                        let frame = ImageBuffer::<Rgb<u8>, _>::from_vec(client.format.width(), client.format.height(), bytes).unwrap();
 
-                        let (_, _, data) = ipcv::generate_preview(&frame, format.width());
+                        let (_, _, data) = ipcv::generate_preview(&frame, client.format.width());
 
                         let _ = output.send(ServerEvent::FrameReceived {
-                            address: address.ip(),
+                            address: client.address.ip(),
                             frame_number: counter,
-                            width: format.width(),
-                            height: format.height(),
+                            width: client.format.width(),
+                            height: client.format.height(),
                             data,
                         });
 
                         frame
                             .save(directory.join(format!("{counter:05}.png")))
                             .unwrap();
-                        println!("Received frame {} from {}", counter.to_string().bright_cyan().bold(), address.to_string().bright_green().bold());
+                        println!("Received frame {} from {}", counter.to_string().bright_cyan().bold(), client.address.to_string().bright_green().bold());
                         counter += 1;
 
                         writeln!(log, "[{:?}] ciaooo {counter:05}", Instant::now())?;
@@ -254,8 +264,12 @@ async fn loop_iteration(
 
                             let socket = data_socket.clone();
                             let output = output.clone();
-                            let format = client.format;
                             let address = SocketAddr::from((address, client.port));
+                            let client_data = ClientData {
+                                format: client.format,
+                                address,
+                                name: client.host.clone(),
+                            };
 
                             let socket = MapSender::new(
                                 UdpFramed::new(socket, ServerMessage::encoder()),
@@ -263,7 +277,7 @@ async fn loop_iteration(
                             );
 
                             join_set.spawn(async move {
-                                if let Err(e) = connection_thread(format, address, settings, token, stream, socket, output).await {
+                                if let Err(e) = connection_thread(client_data, settings, token, stream, socket, output).await {
                                     eprintln!("{e}");
                                 };
                                 address.ip()
