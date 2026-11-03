@@ -3,7 +3,7 @@ use futures::channel::mpsc::UnboundedSender;
 use iced::border::rounded;
 use iced::font::Weight;
 use iced::widget::image::Allocation;
-use iced::widget::{button, column, container, rich_text, row, scrollable, span, text, responsive};
+use iced::widget::{button, column, container,pick_list, rich_text, row, scrollable, span, text, responsive};
 use iced::{Alignment, Element, Font, Length, Subscription, Task, Theme, never};
 use indexmap::IndexMap;
 use lucide_icons::Icon;
@@ -26,11 +26,26 @@ pub fn run(
         .run()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Res {
+    width: u32,
+    height: u32,
+}
+
+impl std::fmt::Display for Res {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}x{}", self.width, self.height)
+    }
+}
+
 struct ClientState {
     host: String,
     last_frame: Option<Allocation>,
     frame_number: u64,
     waiting: bool,
+    supported: Vec<Res>,
+    current: Option<Res>,
+    requested: Option<Res>,
 }
 
 struct State {
@@ -112,7 +127,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             ServerEvent::Stopped => {
                 return iced::exit();
             }
-            ServerEvent::ClientConnected { address, host } => {
+            ServerEvent::ClientConnected { address, host,supported  } => {
                 state.server_status = format!("Connected to {} ({})", host, address);
                 state.clients.insert(
                     address,
@@ -121,6 +136,12 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                         last_frame: None,
                         frame_number: 0,
                         waiting: true,
+                        supported: supported
+                            .into_iter()
+                            .map(|(width, height)| Res { width, height })
+                            .collect(),
+                        current: None,
+                        requested: None,
                     },
                 );
             }
@@ -133,6 +154,8 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                 if let Some(client) = state.clients.get_mut(&address) {
                     state.server_status = format!("Client {} disconnected", address);
                     client.waiting = true;
+                    client.current = None;
+                    client.requested = None;
                 }
             }
             ServerEvent::ClientDenied { address } => {
@@ -153,6 +176,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
 
                 if let Some(client) = state.clients.get_mut(&address) {
                     client.frame_number = frame_number;
+                    client.current = Some(Res { width, height });
                 }
 
                 return iced::widget::image::allocate(handle)
@@ -172,6 +196,11 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
 
             if let InterfaceMessage::AllowClient(address) = cmd {
                 state.denied.shift_remove(&address);
+            }
+            if let InterfaceMessage::SetResolution(address, width, height) = cmd
+                && let Some(client) = state.clients.get_mut(&address)
+            {
+                client.requested = Some(Res { width, height });
             }
 
             let _ = state.gui_tx.unbounded_send(cmd);
@@ -262,7 +291,22 @@ fn view(state: &State) -> Element<'_, InterfaceMessage> {
             )
             .align_left(360),
         );
+        if !client.supported.is_empty() {
+            client_col = client_col.push(
+                row![
+            text("Resolution:").size(14),
+            pick_list(
+                client.requested.or(client.current),
+                client.supported.as_slice(),
+                |r: &Res| r.to_string(),
+            ).on_select(move |r: Res| InterfaceMessage::SetResolution(address, r.width, r.height))
 
+            .placeholder("Select..."),
+        ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+            );
+        }
         {
             let row = if client.waiting {
                 row![

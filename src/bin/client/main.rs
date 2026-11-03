@@ -8,9 +8,14 @@ use ipcv::{
 };
 use nokhwa::{
     CallbackCamera,
-    utils::{CameraFormat, CameraIndex, FrameFormat, RequestedFormat, RequestedFormatType},
+    utils::{
+        CameraFormat, CameraIndex, FrameFormat, RequestedFormat, RequestedFormatType, Resolution,
+    },
+
 };
+
 use std::{
+    collections::BTreeSet,
     net::{IpAddr, SocketAddr},
     time::Duration,
 };
@@ -19,6 +24,13 @@ use tokio::{
     select,
 };
 use tokio_util::{codec::FramedWrite, udp::UdpFramed};
+
+const FORMATS: &[FrameFormat] = &[
+    FrameFormat::RAWRGB,
+    FrameFormat::RAWBGR,
+    FrameFormat::YUYV,
+    FrameFormat::MJPEG,
+];
 
 #[derive(Debug, Clone, Parser)]
 struct Args {
@@ -39,10 +51,32 @@ struct Args {
     client_name: Option<String>,
 }
 
+fn supported_resolutions(camera: &mut CallbackCamera) -> Vec<(u16, u16)> {
+    let mut set: BTreeSet<(u16, u16)> = BTreeSet::new();
+
+    if let Ok(fourccs) = camera.compatible_fourcc() {
+        for fcc in fourccs {
+            if let Ok(map) = camera.compatible_list_by_resolution(fcc) {
+                for res in map.keys() {
+                    if let (Ok(w), Ok(h)) = (u16::try_from(res.width()), u16::try_from(res.height()))
+                    {
+                        set.insert((w, h));
+                    }
+                }
+            }
+        }
+    }
+
+    // max 100 per restare sotto l'MTU del datagramma UDP
+    set.into_iter().take(100).collect()
+}
+
+
 async fn wait_for_server(
     group: IpAddr,
     port: u16,
     camera_format: CameraFormat,
+    supported: &[(u16, u16)],
     name: Option<&str>,
 ) -> std::io::Result<Option<(SocketAddr, Duration, UdpSocket)>> {
     let output = UdpSocket::bind((ipcv::unspecified_from(group), 0)).await?;
@@ -61,6 +95,7 @@ async fn wait_for_server(
             Some(n) => n.to_owned(),
             None => hostname::get()?.to_string_lossy().into_owned(),
         },
+        supported: supported.to_vec(),
     }
     .into_bytes();
 
@@ -145,9 +180,15 @@ async fn client_thread(
             _ = interval.tick() => {
                 let frame = camera.last_frame();
                 if let Ok(frame) = frame {
-                    let bytes = frame.buffer_bytes();
+                    let res = frame.resolution();
+                    let msg = ClientMessage::Frame {
+                        width: res.width(),
+                        height: res.height(),
+                        format: frame.source_frame_format(),
+                        data: frame.buffer_bytes(),
+                    };
 
-                    if let Err(e) = output.send(ClientMessage::Frame(bytes)).await {
+                    if let Err(e) = output.send(msg).await {
                         println!("Cannot send frame ({e}), detaching...");
                         break true;
                     }
@@ -194,6 +235,27 @@ async fn client_thread(
                         heartbeat.tick().await;
                     },
                     ServerMessage::Allow => {}
+                    ServerMessage::SetResolution { width, height } => {
+                        let current = camera.camera_format().unwrap();
+                        let target = CameraFormat::new(
+                            Resolution::new(width, height),
+                            current.format(),
+                            current.frame_rate(),
+                        );
+                        let req = RequestedFormat::with_formats(
+                            RequestedFormatType::Closest(target),
+                            FORMATS,
+                        );
+                        // il cambio è bloccante: block_in_place evita di fermare il runtime
+                        match tokio::task::block_in_place(|| camera.set_camera_requset(req)) {
+                            Ok(actual) => println!(
+                                "Resolution now {}x{}",
+                                actual.width(),
+                                actual.height()
+                            ),
+                            Err(e) => println!("Cannot change resolution ({e})"),
+                        }
+                    }
                 }
             }
         }
@@ -201,17 +263,21 @@ async fn client_thread(
 }
 
 async fn run(args: Args, camera: &mut CallbackCamera) -> std::io::Result<()> {
-    let camera_format = camera.camera_format().unwrap();
+
     println!(
         "Using camera: {}",
         camera.info().human_name().yellow().bold()
     );
+    let supported = supported_resolutions(camera);
+
 
     loop {
+        let camera_format = camera.camera_format().unwrap();
         let Some((address, delay, input_socket)) = wait_for_server(
             args.group,
             args.port,
             camera_format,
+            &supported, //
             args.client_name.as_deref(),
         )
         .await?
@@ -240,15 +306,7 @@ async fn main() -> std::io::Result<()> {
     let old_term = TermMode::new(stdin)?;
 
     let index = CameraIndex::Index(0);
-    let format = RequestedFormat::with_formats(
-        RequestedFormatType::AbsoluteHighestFrameRate,
-        &[
-            FrameFormat::RAWRGB,
-            FrameFormat::RAWBGR,
-            FrameFormat::YUYV,
-            FrameFormat::MJPEG,
-        ],
-    );
+    let format = RequestedFormat::with_formats(RequestedFormatType::AbsoluteHighestFrameRate, FORMATS);
     let mut camera = CallbackCamera::new(index, format, |_| {}).unwrap();
     camera.open_stream().unwrap();
     camera.poll_frame().unwrap();

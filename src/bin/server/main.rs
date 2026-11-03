@@ -23,7 +23,7 @@ use ipcv::messages::ServerMessage;
 use jiff::Timestamp;
 use nokhwa::FormatDecoder;
 use nokhwa::pixel_format::RgbFormat;
-use nokhwa::utils::CameraFormat;
+use nokhwa::utils::{CameraFormat, Resolution};
 use std::io::Write;
 use std::net::Ipv4Addr;
 use std::net::SocketAddr;
@@ -77,7 +77,8 @@ enum ClientStatus {
 struct ClientInfo {
     host: String,
     port: u16,
-    format: CameraFormat,
+    supported: Vec<(u32, u32)>,
+    requested: Option<(u32, u32)>,
     status: ClientStatus,
 }
 
@@ -106,7 +107,6 @@ fn print_clients(clients: &IndexMap<IpAddr, ClientInfo>) {
 }
 
 struct ClientData {
-    format: CameraFormat,
     address: SocketAddr,
     name: String,
 }
@@ -156,17 +156,26 @@ async fn connection_thread(
 
                 match amount {
                     ClientMessage::Close => break,
-                    ClientMessage::Frame(bytes) => {
-                        let bytes = RgbFormat::write_output(client.format.format(), client.format.resolution(), &bytes).unwrap();
-                        let frame = ImageBuffer::<Rgb<u8>, _>::from_vec(client.format.width(), client.format.height(), bytes).unwrap();
+                    ClientMessage::Frame{ width, height, format, data } => {
+                        let bytes = match RgbFormat::write_output(format, Resolution::new(width, height), &data) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            eprintln!("Bad frame from {}: {e}", client.address);
+                            continue;
+                        }
+                    };
+                    let Some(frame) = ImageBuffer::<Rgb<u8>, _>::from_vec(width, height, bytes) else {
+                        eprintln!("Frame size mismatch from {}", client.address);
+                        continue;
+                    };
 
-                        let (_, _, data) = ipcv::generate_preview(&frame, client.format.width());
+                        let (_, _, data) = ipcv::generate_preview(&frame, width);
 
                         let _ = output.send(ServerEvent::FrameReceived {
                             address: client.address.ip(),
                             frame_number: counter,
-                            width: client.format.width(),
-                            height: client.format.height(),
+                            width,
+                            height,
                             data,
                         });
 
@@ -240,6 +249,12 @@ async fn loop_iteration(
                             eprintln!("Cannot send Open to {address}: {e}");
                             return None;
                         }
+                        if let Some((width, height)) = client.requested {
+                            let _ = data_socket_2.send((
+                                ServerMessage::SetResolution { width, height },
+                                (address, client.port).into(),
+                            )).await;
+                        }
 
                         let token = CancellationToken::new();
                         {
@@ -266,7 +281,6 @@ async fn loop_iteration(
                             let output = output.clone();
                             let address = SocketAddr::from((address, client.port));
                             let client_data = ClientData {
-                                format: client.format,
                                 address,
                                 name: client.host.clone(),
                             };
@@ -289,6 +303,17 @@ async fn loop_iteration(
                         client.status = ClientStatus::Connected(token);
                     }
                 }
+                InterfaceMessage::SetResolution(address, width, height) => {
+                    if let Some(client) = clients.get_mut(&address)
+                        && client.supported.contains(&(width, height)){
+                        client.requested = Some((width, height));
+                        if matches!(client.status, ClientStatus::Connected(_)) {
+                            let msg = ServerMessage::SetResolution { width, height };
+                            let _ = data_socket_2.send((msg, (address, client.port).into())).await;
+                        }
+                    }
+                }
+
                 InterfaceMessage::OpenFolder(address) => {
                     let path = settings.output.join(address.to_string());
                     if let Err(e) = open::that_detached(path) {
@@ -301,7 +326,11 @@ async fn loop_iteration(
                 }
             }
         }
-        Some(Ok((ClientInitialMessage { port, format, host }, address))) = StreamExt::next(&mut data_socket_2) => {
+        Some(Ok((ClientInitialMessage { port, host,supported,format: _}, address))) = StreamExt::next(&mut data_socket_2) => {
+            let supported: Vec<(u32, u32)> = supported
+        .into_iter()
+        .map(|(w, h)| (w as u32, h as u32))
+        .collect();
             let address = address.ip();
 
             if !clients.contains_key(&address) {
@@ -311,9 +340,14 @@ async fn loop_iteration(
                     let _ = data_socket_2.send((msg, (address, port).into())).await;
                     return None;
                 }
+                let supported: Vec<(u32, u32)> = supported
+                    .into_iter()
+                    .map(|(w, h)| (w as u32, h as u32))
+                    .collect();
                 let _ = output.send(ServerEvent::ClientConnected {
                     address,
                     host: host.to_owned(),
+                    supported: supported.clone(),
                 });
 
                 println!(
@@ -325,7 +359,8 @@ async fn loop_iteration(
                 let info = ClientInfo {
                     host,
                     port,
-                    format,
+                    supported,
+                    requested: None,
                     status: ClientStatus::Waiting,
                 };
                 clients.insert(address, info);
@@ -477,6 +512,7 @@ pub enum ServerEvent {
     ClientConnected {
         address: IpAddr,
         host: String,
+        supported: Vec<(u32, u32)>,
     },
     ClientAccepted {
         address: IpAddr,
@@ -506,4 +542,5 @@ pub enum InterfaceMessage {
     OpenFolder(IpAddr),
     Shutdown { force: bool },
     Move(usize, usize),
+    SetResolution(IpAddr, u32, u32),
 }

@@ -79,6 +79,8 @@ pub enum ServerMessage {
     /// Message to keep the connection alive
     Heartbeat,
     Allow,
+    //asks the client for the resolution of the camera
+    SetResolution { width: u32, height: u32 },
 }
 
 impl Encode for ServerMessage {
@@ -97,6 +99,11 @@ impl Encode for ServerMessage {
             }
             Self::Allow => {
                 dst.put_u8(4);
+            }
+            Self::SetResolution { width, height } => {
+                dst.put_u8(5);
+                dst.put_u32(width);
+                dst.put_u32(height);
             }
         }
     }
@@ -122,6 +129,10 @@ impl Decode for ServerMessage {
                 Self::UpdateInterval(interval)
             }
             4 => Self::Allow,
+            5 => Self::SetResolution {
+                width: src.try_get_u32().ok()?,
+                height: src.try_get_u32().ok()?,
+            },
             _ => return None,
         })
     }
@@ -129,17 +140,26 @@ impl Decode for ServerMessage {
 
 /// A message sent from the client to the server
 pub enum ClientMessage {
-    Frame(Bytes),
+    Frame {
+        width: u32,
+        height: u32,
+        format: FrameFormat,
+        data: Bytes,
+    },
     Close,
 }
 
 impl Encode for ClientMessage {
     fn encode(self, dst: &mut bytes::BytesMut) {
         match self {
-            Self::Frame(data) => {
+            Self::Frame { width, height, format, data } => {
+                dst.reserve(14 + data.len());
                 dst.put_u8(0);
-                dst.extend((data.len() as u32).to_be_bytes());
-                dst.extend(data);
+                dst.put_u32(data.len() as u32);
+                dst.put_u32(width);
+                dst.put_u32(height);
+                dst.put_u8(format_to_u8(format));
+                dst.extend_from_slice(&data);
             }
             Self::Close => dst.put_u8(1),
         }
@@ -148,17 +168,21 @@ impl Encode for ClientMessage {
 
 impl Decode for ClientMessage {
     fn decode(src: &mut bytes::BytesMut) -> Option<Self> {
+        const HEADER: usize = 14;  // tipo + len + w + h + format
         let result = match src.first()? {
             0 => {
-                let data = src.get(1..5)?;
-                let size = u32::from_be_bytes(data.try_into().ok()?) as usize;
-                if src.len() >= 5 + size {
-                    src.advance(5);
-                    let inner = src.split_to(size);
-                    Self::Frame(inner.into())
-                } else {
+                let h = src.get(..HEADER)?;
+                let size = u32::from_be_bytes(h[1..5].try_into().ok()?) as usize;
+                let width = u32::from_be_bytes(h[5..9].try_into().ok()?);
+                let height = u32::from_be_bytes(h[9..13].try_into().ok()?);
+                let format = format_from_u8(h[13])
+                    .unwrap_or_else(|| panic!("Received unknown frame format"));
+                if src.len() < HEADER + size {
                     return None;
                 }
+                src.advance(HEADER);
+                let data = src.split_to(size).freeze();
+                Self::Frame { width, height, format, data }
             }
             1 => {
                 src.advance(1);
@@ -176,6 +200,7 @@ pub struct ClientInitialMessage {
     pub port: u16,
     pub format: CameraFormat,
     pub host: String,
+    pub supported: Vec<(u16,u16)>,
 }
 
 impl Encode for ClientInitialMessage {
@@ -185,14 +210,18 @@ impl Encode for ClientInitialMessage {
         dst.put_u32(self.format.width());
         dst.put_u32(self.format.height());
         dst.put_u32(self.format.frame_rate());
-        dst.put_u8(match self.format.format() {
-            FrameFormat::MJPEG => 0,
-            FrameFormat::YUYV => 1,
-            FrameFormat::NV12 => 2,
-            FrameFormat::GRAY => 3,
-            FrameFormat::RAWRGB => 4,
-            FrameFormat::RAWBGR => 5,
-        });
+        dst.put_u8(format_to_u8(CameraFormat::format(&self.format)));
+
+        // Numero di risoluzioni (max 100 per restare sotto l'MTU),
+        // (width,length)
+        let n = self.supported.len().min(100);
+        dst.put_u8(n as u8);
+        for (w, h) in &self.supported[..n] {
+            dst.put_u16(*w);
+            dst.put_u16(*h);
+        }
+
+        // L'host va per ultimo: occupa tutto il resto del buffer
         dst.extend(self.host.bytes());
     }
 }
@@ -207,21 +236,47 @@ impl Decode for ClientInitialMessage {
         let width = u32::from_be_bytes(data.next_array()?);
         let height = u32::from_be_bytes(data.next_array()?);
         let frame_rate = u32::from_be_bytes(data.next_array()?);
-        let format = match data.next()? {
-            0 => FrameFormat::MJPEG,
-            1 => FrameFormat::YUYV,
-            2 => FrameFormat::NV12,
-            3 => FrameFormat::GRAY,
-            4 => FrameFormat::RAWRGB,
-            5 => FrameFormat::RAWBGR,
-            _ => return None,
-        };
+        let format = format_from_u8(data.next()?)?;
+
+        let n = data.next()?;
+        let mut supported = Vec::with_capacity(n as usize);
+        for _ in 0..n {
+            let w = u16::from_be_bytes(data.next_array()?);
+            let h = u16::from_be_bytes(data.next_array()?);
+            supported.push((w, h));
+        }
+
         let host = String::from_utf8(data.collect()).ok()?;
 
         Some(Self {
             port,
             format: CameraFormat::new_from(width, height, format, frame_rate),
             host,
+            supported,
         })
     }
+}
+
+//different resolution format
+fn format_to_u8(f: FrameFormat) -> u8 {
+    match f {
+        FrameFormat::MJPEG => 0,
+        FrameFormat::YUYV => 1,
+        FrameFormat::NV12 => 2,
+        FrameFormat::GRAY => 3,
+        FrameFormat::RAWRGB => 4,
+        FrameFormat::RAWBGR => 5,
+    }
+}
+
+fn format_from_u8(b: u8) -> Option<FrameFormat> {
+    Some(match b {
+        0 => FrameFormat::MJPEG,
+        1 => FrameFormat::YUYV,
+        2 => FrameFormat::NV12,
+        3 => FrameFormat::GRAY,
+        4 => FrameFormat::RAWRGB,
+        5 => FrameFormat::RAWBGR,
+        _ => return None,
+    })
 }
