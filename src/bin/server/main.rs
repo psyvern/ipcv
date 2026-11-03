@@ -110,7 +110,18 @@ struct ClientData {
     address: SocketAddr,
     name: String,
 }
-
+fn sanitize_name(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| match c {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
+            c if c.is_control() => '_',
+            c => c,
+        })
+        .collect();
+    let cleaned = cleaned.trim().trim_end_matches('.');
+    if cleaned.is_empty() { "unknown".to_owned() } else { cleaned.to_owned() }
+}
 async fn connection_thread(
     client: ClientData,
     settings: Args,
@@ -123,13 +134,9 @@ async fn connection_thread(
 
     let mut reader = FramedRead::new(stream, ClientMessage::decoder());
 
-    let directory = settings.output.join(format!(
-        "{:?} - {}",
-        Timestamp::now().as_second(),
-        client.name
-    ));
-    let _ = std::fs::remove_dir_all(&directory);
-    std::fs::create_dir(&directory)?;
+    let created = jiff::Zoned::now().strftime("%Y-%m-%d_%H-%M-%S");
+    let directory = settings.output.join(format!("{} - {}", sanitize_name(&client.name), created));
+    std::fs::create_dir_all(&directory)?;
 
     let mut log = File::create(directory.join("output.log"))?;
 
