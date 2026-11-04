@@ -8,7 +8,6 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use futures::SinkExt;
 use futures::StreamExt;
 use futures::channel::mpsc::UnboundedReceiver;
-use image::{ImageBuffer, Rgb};
 use indexmap::IndexMap;
 use ipcv::CustomSender;
 use ipcv::MapSender;
@@ -21,12 +20,13 @@ use ipcv::messages::Decode;
 use ipcv::messages::Encode;
 use ipcv::messages::ServerMessage;
 use jiff::Timestamp;
-use nokhwa::FormatDecoder;
-use nokhwa::pixel_format::RgbFormat;
 use nokhwa::utils::CameraFormat;
-use std::io::Write;
+use send_ctrlc::{Interruptible, InterruptibleChild, InterruptibleCommand};
+use std::io::{BufReader, Read};
 use std::net::Ipv4Addr;
 use std::net::SocketAddr;
+use std::path::Path;
+use std::process::{ChildStdout, Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::{fs::File, net::IpAddr, path::PathBuf};
@@ -35,7 +35,6 @@ use tokio::runtime::Runtime;
 use tokio::task::JoinSet;
 use tokio::{net::UdpSocket, select};
 use tokio_util::codec::FramedRead;
-use tokio_util::sync::CancellationToken;
 use tokio_util::udp::UdpFramed;
 
 #[derive(Debug, Clone, Parser)]
@@ -53,6 +52,9 @@ pub struct Args {
     /// Communication port for TCP stream
     #[arg(long, short, default_value_t = 5008)]
     tcp_port: u16,
+    /// How many ports for UDP streams
+    #[arg(long, default_value_t = 10)]
+    udp_ports: u8,
     /// Interval between updates from clients
     #[arg(long, short, value_parser = humantime::parse_duration, default_value = "5s")]
     update_interval: Duration,
@@ -69,7 +71,7 @@ pub struct Args {
 
 #[derive(Debug)]
 enum ClientStatus {
-    Connected(CancellationToken),
+    Connected(tokio::sync::mpsc::Sender<InfraThreadMessage>, u16),
     Waiting,
 }
 
@@ -108,19 +110,127 @@ fn print_clients(clients: &IndexMap<IpAddr, ClientInfo>) {
 struct ClientData {
     format: CameraFormat,
     address: SocketAddr,
+    udp_port: u16,
     name: String,
+}
+
+fn stdout_thread(
+    address: IpAddr,
+    stdout: ChildStdout,
+    output: &flume::Sender<ServerEvent>,
+) -> std::io::Result<()> {
+    let mut stdout = BufReader::new(stdout);
+
+    let mut header = [0u8; 6];
+    loop {
+        stdout.read_exact(&mut header)?;
+
+        if !(header[0] == b'B' && header[1] == b'M') {
+            panic!("unexpected header: {header:?}");
+        }
+
+        let size = u32::from_le_bytes([header[2], header[3], header[4], header[5]]) as usize;
+
+        let mut buf = vec![0; size];
+        stdout.read_exact(&mut buf[6..])?;
+
+        let offset = u32::from_le_bytes([buf[10], buf[11], buf[12], buf[13]]) as usize;
+
+        let width = u32::from_le_bytes([buf[18], buf[19], buf[20], buf[21]]);
+        let height = u32::from_le_bytes([buf[22], buf[23], buf[24], buf[25]]);
+        let data = buf.split_off(offset);
+        let data = ipcv::bgra_to_rgba(data);
+
+        output
+            .send(ServerEvent::FrameReceived {
+                address,
+                width,
+                height,
+                data,
+            })
+            .unwrap();
+    }
+
+    Ok(())
+}
+
+enum InfraThreadMessage {
+    Close,
+    Rotate,
+}
+
+fn build_ffmpeg_command(
+    address: SocketAddr,
+    directory: &Path,
+    index: usize,
+    rotation: u8,
+) -> send_ctrlc::InterruptibleChild {
+    let ts_file = directory.join(format!("output-{index}.ts"));
+
+    Command::new("ffmpeg")
+        .args(["-hide_banner", "-v", "info"])
+        .args([
+            "-probesize",
+            "32",
+            // "-analyzeduration",
+            // "1000000",
+            "-fflags",
+            "nobuffer",
+            "-flags",
+            "low_delay",
+            "-i",
+        ])
+        .arg(format!("udp://{address}"))
+        .arg(ts_file)
+        .arg("-vf")
+        .arg(match rotation {
+            0 => "scale=-1:270,transpose=1,transpose=1",
+            1 => "scale=-1:270,transpose=1",
+            2 => "scale=-1:270",
+            _ => "scale=-1:270,transpose=2",
+        })
+        .args([
+            "-r",
+            "2",
+            "-f",
+            "image2pipe",
+            "-vcodec",
+            "bmp",
+            "-pix_fmt",
+            "bgra",
+            "pipe:1",
+        ])
+        .stderr(Stdio::inherit())
+        .stdout(Stdio::piped())
+        .spawn_interruptible()
+        .unwrap()
+}
+
+fn command_terminate_then_kill(mut command: InterruptibleChild) {
+    command.terminate();
+
+    // TODO: temporary fix for block
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(2) {
+        match command.try_wait() {
+            Err(_) | Ok(Some(_)) => return,
+            _ => {}
+        }
+    }
+
+    command.kill();
 }
 
 async fn connection_thread(
     client: ClientData,
     settings: Args,
-    token: CancellationToken,
+    mut input: tokio::sync::mpsc::Receiver<InfraThreadMessage>,
     stream: TcpStream,
     mut socket: impl CustomSender<ServerMessage>,
     output: flume::Sender<ServerEvent>,
 ) -> std::io::Result<()> {
-    let mut counter = 0u64;
-
+    let mut rotation = 0;
+    let mut file_index = 0;
     let mut reader = FramedRead::new(stream, ClientMessage::decoder());
 
     let directory = settings.output.join(format!(
@@ -138,50 +248,76 @@ async fn connection_thread(
     let mut interval_2 = tokio::time::interval(settings.update_interval * 5);
     interval_2.tick().await;
 
+    let mut command = build_ffmpeg_command(
+        (client.address.ip(), client.udp_port).into(),
+        &directory,
+        file_index,
+        rotation,
+    );
+
+    let mut ffmpeg_thread = {
+        let stdout = command.stdout.take().unwrap();
+        std::thread::spawn(move || {
+            let result = stdout_thread(client.address.ip(), stdout, &output);
+            if let Err(e) = result {
+                if e.kind() != std::io::ErrorKind::UnexpectedEof {
+                    println!("{e:#?}");
+                }
+            }
+
+            output
+        })
+    };
+
     loop {
         select! {
-            biased;
-            _ = token.cancelled() => {
-                break;
+            Some(message) = input.recv() => {
+                match message {
+                    InfraThreadMessage::Close => {
+                        break;
+                    }
+                    InfraThreadMessage::Rotate => {
+                        file_index += 1;
+                        rotation += 1;
+                        rotation %= 4;
+
+                        command_terminate_then_kill(command);
+                        let output = ffmpeg_thread.join().unwrap();
+
+                        command =
+                            build_ffmpeg_command((client.address.ip(), client.udp_port).into(), &directory, file_index, rotation);
+                        ffmpeg_thread = {
+                            let stdout = command.stdout.take().unwrap();
+                            std::thread::spawn(move || {
+                                let result = stdout_thread(client.address.ip(), stdout, &output);
+                                if let Err(e) = result {
+                                    if e.kind() != std::io::ErrorKind::UnexpectedEof {
+                                        println!("{e:#?}");
+                                    }
+                                }
+
+                                output
+                            })
+                        };
+                    }
+                }
             }
             _ = interval.tick() => {
-                println!("Client not sending anything, closing...");
-                break;
+                // println!("Client not sending anything, closing...");
+                // break;
             }
             _ = interval_2.tick() => {
                 let _ = socket.send(ServerMessage::Heartbeat).await;
             }
             Some(Ok(amount)) = reader.next() => {
-                interval.reset();
-
                 match amount {
                     ClientMessage::Close => break,
-                    ClientMessage::Frame(bytes) => {
-                        let bytes = RgbFormat::write_output(client.format.format(), client.format.resolution(), &bytes).unwrap();
-                        let frame = ImageBuffer::<Rgb<u8>, _>::from_vec(client.format.width(), client.format.height(), bytes).unwrap();
-
-                        let (_, _, data) = ipcv::generate_preview(&frame, client.format.width());
-
-                        let _ = output.send(ServerEvent::FrameReceived {
-                            address: client.address.ip(),
-                            frame_number: counter,
-                            width: client.format.width(),
-                            height: client.format.height(),
-                            data,
-                        });
-
-                        frame
-                            .save(directory.join(format!("{counter:05}.png")))
-                            .unwrap();
-                        println!("Received frame {} from {}", counter.to_string().bright_cyan().bold(), client.address.to_string().bright_green().bold());
-                        counter += 1;
-
-                        writeln!(log, "[{:?}] ciaooo {counter:05}", Instant::now())?;
-                    }
                 }
             }
         }
     }
+
+    command_terminate_then_kill(command);
 
     Ok(())
 }
@@ -207,11 +343,11 @@ async fn loop_iteration(
                 InterfaceMessage::PrintClients => print_clients(clients),
                 InterfaceMessage::DisconnectClient(address) => {
                     if let Some(client) = clients.get_mut(&address)
-                        && let ClientStatus::Connected(token) = &client.status {
+                        && let ClientStatus::Connected(sender, _) = &client.status {
                             println!("Closing connection to `{}`", client.host);
                             let msg = ServerMessage::Close { force: false };
                             let _ = data_socket_2.send((msg, (address, client.port).into())).await;
-                            token.cancel();
+                            sender.send(InfraThreadMessage::Close).await;
 
                             client.status = ClientStatus::Waiting;
 
@@ -232,21 +368,30 @@ async fn loop_iteration(
                     }
                 }
                 InterfaceMessage::AcceptClient(address) => {
+                    let Some(udp_port) = ((settings.port + 1)..(settings.port + 1 + settings.udp_ports as u16))
+                        .find(|port| !clients.iter().any(|(_, x)| match x.status {
+                            ClientStatus::Connected(_, x) if x == *port => true,
+                            _ => false
+                        }))
+                     else {
+                            eprintln!("No UDP port left for {address}");
+                            return None;
+                        };
+
                     if let Some(client) = clients.get_mut(&address) {
+
                         if let Err(e) = data_socket_2.send((
-                            ServerMessage::Open { port: settings.tcp_port, interval: settings.update_interval },
+                            ServerMessage::Open { tcp_port: settings.tcp_port , udp_port, interval: settings.update_interval },
                             (address, client.port).into(),
                         )).await {
                             eprintln!("Cannot send Open to {address}: {e}");
                             return None;
                         }
 
-                        let token = CancellationToken::new();
+                        let (infra_thread_tx, infra_thread_rx) = tokio::sync::mpsc::channel(10);
                         {
                             //let mut denied = false;
                             let settings = settings.clone();
-                            let token = token.clone();
-
 
                             let stream = match tokio::time::timeout(Duration::from_secs(5), listener.accept()).await {
                                 Ok(Ok((stream, _))) => stream,
@@ -268,6 +413,7 @@ async fn loop_iteration(
                             let client_data = ClientData {
                                 format: client.format,
                                 address,
+                                udp_port,
                                 name: client.host.clone(),
                             };
 
@@ -277,16 +423,17 @@ async fn loop_iteration(
                             );
 
                             join_set.spawn(async move {
-                                if let Err(e) = connection_thread(client_data, settings, token, stream, socket, output).await {
+                                if let Err(e) = connection_thread(client_data, settings, infra_thread_rx, stream, socket, output).await {
                                     eprintln!("{e}");
                                 };
                                 address.ip()
                             });
+
                         }
 
                         let _ = output.send(ServerEvent::ClientAccepted { address });
 
-                        client.status = ClientStatus::Connected(token);
+                        client.status = ClientStatus::Connected(infra_thread_tx, udp_port);
                     }
                 }
                 InterfaceMessage::OpenFolder(address) => {
@@ -296,6 +443,13 @@ async fn loop_iteration(
                     }
                 }
                 InterfaceMessage::Move(_, _) => {}
+                InterfaceMessage::Rotate(address) => {
+                    if let Some(client) = clients.get(&address) {
+                        if let ClientStatus::Connected(sender, _) = &client.status {
+                            sender.send(InfraThreadMessage::Rotate).await;
+                        }
+                    }
+                }
                 InterfaceMessage::Shutdown { force } => {
                     return Some(force);
                 }
@@ -387,12 +541,12 @@ pub async fn server_loop(
 
         if let Some(force) = force {
             for (address, info) in clients {
-                if let ClientStatus::Connected(token) = info.status {
+                if let ClientStatus::Connected(sender, _) = info.status {
                     println!("Closing connection to `{}`", info.host);
                     socket_2
                         .send((ServerMessage::Close { force }, (address, info.port).into()))
                         .await?;
-                    token.cancel();
+                    sender.send(InfraThreadMessage::Close).await;
                 }
             }
 
@@ -468,7 +622,10 @@ fn main() -> iced::Result {
     });
 
     let _guard = runtime.enter();
-    gui::run(gui_tx, server_rx)
+
+    gui::run(gui_tx, server_rx)?;
+
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -489,7 +646,6 @@ pub enum ServerEvent {
     },
     FrameReceived {
         address: IpAddr,
-        frame_number: u64,
         width: u32,
         height: u32,
         data: Vec<u8>,
@@ -506,4 +662,5 @@ pub enum InterfaceMessage {
     OpenFolder(IpAddr),
     Shutdown { force: bool },
     Move(usize, usize),
+    Rotate(IpAddr),
 }

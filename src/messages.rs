@@ -1,6 +1,6 @@
 use std::{marker::PhantomData, time::Duration};
 
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, BytesMut};
 use itertools::Itertools;
 use nokhwa::utils::{CameraFormat, FrameFormat};
 use tokio_util::codec::{Decoder, Encoder};
@@ -65,7 +65,9 @@ pub enum ServerMessage {
     /// Open the TCP connection
     Open {
         /// The port of the TCP socket
-        port: u16,
+        tcp_port: u16,
+        /// The port of the UDP socket
+        udp_port: u16,
         /// How often to send frame updates
         interval: Duration,
     },
@@ -84,9 +86,14 @@ pub enum ServerMessage {
 impl Encode for ServerMessage {
     fn encode(self, dst: &mut bytes::BytesMut) {
         match self {
-            Self::Open { port, interval } => {
+            Self::Open {
+                tcp_port,
+                udp_port,
+                interval,
+            } => {
                 dst.put_u8(0);
-                dst.extend(port.to_be_bytes());
+                dst.extend(tcp_port.to_be_bytes());
+                dst.extend(udp_port.to_be_bytes());
                 dst.extend(interval.as_secs_f64().to_be_bytes());
             }
             Self::Close { force } => dst.extend([1, force as u8]),
@@ -107,10 +114,15 @@ impl Decode for ServerMessage {
         let src = &mut src.split();
         Some(match src.try_get_u8().ok()? {
             0 => {
-                let port = src.try_get_u16().ok()?;
+                let tcp_port = src.try_get_u16().ok()?;
+                let udp_port = src.try_get_u16().ok()?;
                 let interval = Duration::try_from_secs_f64(src.try_get_f64().ok()?).ok()?;
 
-                Self::Open { port, interval }
+                Self::Open {
+                    tcp_port,
+                    udp_port,
+                    interval,
+                }
             }
             1 => {
                 let force = src.try_get_u8().ok()? != 0;
@@ -129,18 +141,12 @@ impl Decode for ServerMessage {
 
 /// A message sent from the client to the server
 pub enum ClientMessage {
-    Frame(Bytes),
     Close,
 }
 
 impl Encode for ClientMessage {
     fn encode(self, dst: &mut bytes::BytesMut) {
         match self {
-            Self::Frame(data) => {
-                dst.put_u8(0);
-                dst.extend((data.len() as u32).to_be_bytes());
-                dst.extend(data);
-            }
             Self::Close => dst.put_u8(1),
         }
     }
@@ -149,17 +155,6 @@ impl Encode for ClientMessage {
 impl Decode for ClientMessage {
     fn decode(src: &mut bytes::BytesMut) -> Option<Self> {
         let result = match src.first()? {
-            0 => {
-                let data = src.get(1..5)?;
-                let size = u32::from_be_bytes(data.try_into().ok()?) as usize;
-                if src.len() >= 5 + size {
-                    src.advance(5);
-                    let inner = src.split_to(size);
-                    Self::Frame(inner.into())
-                } else {
-                    return None;
-                }
-            }
             1 => {
                 src.advance(1);
                 Self::Close
