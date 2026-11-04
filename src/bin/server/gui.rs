@@ -37,7 +37,7 @@ impl std::fmt::Display for Res {
         write!(f, "{}x{}", self.width, self.height)
     }
 }
-
+const STALL_COLOR: iced::Color = iced::Color::from_rgb(0.95, 0.6, 0.1);
 struct ClientState {
     host: String,
     last_frame: Option<Allocation>,
@@ -46,6 +46,7 @@ struct ClientState {
     supported: Vec<Res>,
     current: Option<Res>,
     requested: Option<Res>,
+    stalled: bool,
 }
 
 struct State {
@@ -142,12 +143,14 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                             .collect(),
                         current: None,
                         requested: None,
+                        stalled: false,
                     },
                 );
             }
             ServerEvent::ClientAccepted { address } => {
                 if let Some(client) = state.clients.get_mut(&address) {
                     client.waiting = false;
+                    client.stalled = false;
                 }
             }
             ServerEvent::ClientDisconnected { address } => {
@@ -156,6 +159,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                     client.waiting = true;
                     client.current = None;
                     client.requested = None;
+                    client.stalled = false;
                 }
             }
             ServerEvent::ClientDenied { address } => {
@@ -177,10 +181,21 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                 if let Some(client) = state.clients.get_mut(&address) {
                     client.frame_number = frame_number;
                     client.current = Some(Res { width, height });
+                    client.stalled = false;
                 }
 
                 return iced::widget::image::allocate(handle)
                     .map(move |x| Message::ThumbnailAllocated(address, x));
+            }
+            ServerEvent::ClientStalled { address, stalled } => {
+                if let Some(client) = state.clients.get_mut(&address) {
+                    client.stalled = stalled;
+                    state.server_status = if stalled {
+                        format!("Client {} is not responding", address)
+                    } else {
+                        format!("Client {} is responding again", address)
+                    };
+                }
             }
         },
         Message::Interface(cmd) => {
@@ -241,6 +256,14 @@ fn view(state: &State) -> Element<'_, InterfaceMessage> {
                     ]
                     .align_x(Alignment::Center),
                 )
+            } else if client.stalled {
+                Element::new(
+                    column![
+            Icon::WifiOff.widget().size(96),
+            text("No signal").size(16)
+            ]
+                        .align_x(Alignment::Center),
+                )
             } else {
                 if let Some(frame) = &client.last_frame {
                     Element::new(iced::widget::image(frame.handle()).border_radius(8))
@@ -291,6 +314,10 @@ fn view(state: &State) -> Element<'_, InterfaceMessage> {
             )
             .align_left(360),
         );
+        if client.stalled {
+            client_col = client_col
+                .push(text("No data received from client").size(14).color(STALL_COLOR));
+        }
         if !client.supported.is_empty() {
             client_col = client_col.push(
                 row![
@@ -343,13 +370,18 @@ fn view(state: &State) -> Element<'_, InterfaceMessage> {
 
             client_col = client_col.push(row);
         }
-
+        let stalled = client.stalled;
         clients_grid = clients_grid.push(
             container(client_col)
-                .style(|theme| {
+                .style(move |theme| {
+                    let border = if stalled {
+                        rounded(16).color(STALL_COLOR).width(3)
+                    } else {
+                        rounded(16)
+                    };
                     container::Style::default()
                         .background(theme.palette().background.weakest.color)
-                        .border(rounded(16))
+                        .border(border)
                 })
                 .padding(8),
         );

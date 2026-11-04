@@ -144,6 +144,10 @@ async fn connection_thread(
     interval.tick().await;
     let mut interval_2 = tokio::time::interval(settings.update_interval * 5);
     interval_2.tick().await;
+    let stall_after = settings.update_interval * 3;
+    let mut last_message = Instant::now();
+    let mut stalled = false;
+    let mut stall_check = tokio::time::interval(Duration::from_millis(500));
 
     loop {
         select! {
@@ -158,9 +162,27 @@ async fn connection_thread(
             _ = interval_2.tick() => {
                 let _ = socket.send(ServerMessage::Heartbeat).await;
             }
+            _ = stall_check.tick() => {
+            if !stalled && last_message.elapsed() >= stall_after {
+                stalled = true;
+                println!("Client {} is not sending data", client.address.ip());
+                let _ = output.send(ServerEvent::ClientStalled {
+                    address: client.address.ip(),
+                    stalled: true,
+                });
+            }
+        }
             Some(Ok(amount)) = reader.next() => {
                 interval.reset();
-
+                last_message = Instant::now();
+                if stalled {
+                    stalled = false;
+                    println!("Client {} is sending data again", client.address.ip());
+                    let _ = output.send(ServerEvent::ClientStalled {
+                        address: client.address.ip(),
+                        stalled: false,
+                    });
+                }
                 match amount {
                     ClientMessage::Close => break,
                     ClientMessage::Frame{ width, height, format, data } => {
@@ -536,6 +558,10 @@ pub enum ServerEvent {
         width: u32,
         height: u32,
         data: Vec<u8>,
+    },
+    ClientStalled {
+        address: IpAddr,
+        stalled: bool,
     },
 }
 
