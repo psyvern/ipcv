@@ -8,6 +8,7 @@ use std::{
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use futures::{Sink, SinkExt};
 use image::{ImageBuffer, Rgb};
+use itertools::Itertools;
 
 pub fn is_closing_key(event: KeyEvent) -> bool {
     matches!(
@@ -72,6 +73,13 @@ pub fn unspecified_from(address: IpAddr) -> IpAddr {
     }
 }
 
+pub fn rgb_to_rgba(frame: Vec<u8>) -> Vec<u8> {
+    frame
+        .into_iter()
+        .tuples()
+        .flat_map(|(r, g, b)| [r, g, b, 0xFF])
+        .collect()
+}
 pub fn generate_preview(
     frame: &ImageBuffer<Rgb<u8>, Vec<u8>>,
     max_width: u32,
