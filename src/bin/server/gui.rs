@@ -3,7 +3,7 @@ use futures::channel::mpsc::UnboundedSender;
 use iced::border::rounded;
 use iced::font::Weight;
 use iced::widget::image::Allocation;
-use iced::widget::{button, column, container, rich_text, row, scrollable, span, text, responsive};
+use iced::widget::{button, column, container, responsive, rich_text, row, scrollable, span, text};
 use iced::{Alignment, Element, Font, Length, Subscription, Task, Theme, never};
 use indexmap::IndexMap;
 use lucide_icons::Icon;
@@ -376,7 +376,7 @@ fn view(state: &State) -> Element<'_, InterfaceMessage> {
 
         let denied_list = column![text("Denied clients").size(20), denied_grid].spacing(8);
 
-        content = content.push(denied_list);    
+        content = content.push(denied_list);
     }
 
     container(content)

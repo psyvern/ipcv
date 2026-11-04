@@ -10,8 +10,10 @@ use nokhwa::{
     CallbackCamera,
     utils::{CameraFormat, CameraIndex, FrameFormat, RequestedFormat, RequestedFormatType},
 };
+use send_ctrlc::{Interruptible, InterruptibleCommand};
 use std::{
     net::{IpAddr, SocketAddr},
+    process::{Command, Stdio},
     time::Duration,
 };
 use tokio::{
@@ -44,7 +46,7 @@ async fn wait_for_server(
     port: u16,
     camera_format: CameraFormat,
     name: Option<&str>,
-) -> std::io::Result<Option<(SocketAddr, Duration, UdpSocket)>> {
+) -> std::io::Result<Option<(SocketAddr, u16, Duration, UdpSocket)>> {
     let output = UdpSocket::bind((ipcv::unspecified_from(group), 0)).await?;
     output.set_ttl(2)?;
     output.connect((group, port)).await?;
@@ -92,8 +94,8 @@ async fn wait_for_server(
 
                 if let Some(msg) = ServerMessage::from_bytes(&data[..size]) {
                     match msg {
-                        ServerMessage::Open { port, interval } => {
-                            return Ok(Some((SocketAddr::new(address, port), interval, input_socket)));
+                        ServerMessage::Open { tcp_port, udp_port, interval } => {
+                            return Ok(Some((SocketAddr::new(address, tcp_port),  udp_port, interval, input_socket)));
                         }
                         ServerMessage::Close { force } => {
                             if force {
@@ -120,6 +122,7 @@ async fn wait_for_server(
 async fn client_thread(
     camera: &mut CallbackCamera,
     address: SocketAddr,
+    udp_port: u16,
     time: Duration,
     // Reuse the socket from wait_for_server
     input_socket: UdpSocket,
@@ -134,29 +137,24 @@ async fn client_thread(
     };
     let mut output = FramedWrite::new(stream, ClientMessage::encoder());
     let mut events = EventStream::new();
-    let mut counter = 0;
 
-    let mut interval = tokio::time::interval(time);
     let mut heartbeat = tokio::time::interval(time * 10);
     heartbeat.tick().await;
 
-    Ok(loop {
+    // -vf "transpose=2,transpose=2"
+    let mut command = Command::new("ffmpeg")
+        .args(["-hide_banner", "-v", "warning"])
+        .args(["-re", "-hwaccel", "auto"])
+        .args(["-i", "/dev/video0"])
+        .args(["-framerate", "30", "-f", "mpegts"])
+        .arg(format!("udp:{}:{}", address.ip(), udp_port))
+        .stderr(Stdio::inherit())
+        .stdout(Stdio::piped())
+        .spawn_interruptible()
+        .unwrap();
+
+    let result = loop {
         select! {
-            _ = interval.tick() => {
-                let frame = camera.last_frame();
-                if let Ok(frame) = frame {
-                    let bytes = frame.buffer_bytes();
-
-                    if let Err(e) = output.send(ClientMessage::Frame(bytes)).await {
-                        println!("Cannot send frame ({e}), detaching...");
-                        break true;
-                    }
-
-                    // socket.send(counter.to_string().into_bytes());
-                    println!("Sending frame: {}", counter.to_string().bright_cyan().bold());
-                    counter += 1;
-                }
-            }
             _ = heartbeat.tick() => {
                 println!("Server did not heartbeat, detaching...");
                 let _ = output.send(ClientMessage::Close).await;
@@ -189,7 +187,6 @@ async fn client_thread(
                     }
                     ServerMessage::Heartbeat => heartbeat.reset(),
                     ServerMessage::UpdateInterval(x) => {
-                        interval = tokio::time::interval(x);
                         heartbeat = tokio::time::interval(x * 10);
                         heartbeat.tick().await;
                     },
@@ -197,7 +194,12 @@ async fn client_thread(
                 }
             }
         }
-    })
+    };
+
+    command.interrupt();
+    command.wait();
+
+    Ok(result)
 }
 
 async fn run(args: Args, camera: &mut CallbackCamera) -> std::io::Result<()> {
@@ -208,7 +210,7 @@ async fn run(args: Args, camera: &mut CallbackCamera) -> std::io::Result<()> {
     );
 
     loop {
-        let Some((address, delay, input_socket)) = wait_for_server(
+        let Some((address, udp_port, delay, input_socket)) = wait_for_server(
             args.group,
             args.port,
             camera_format,
@@ -221,7 +223,7 @@ async fn run(args: Args, camera: &mut CallbackCamera) -> std::io::Result<()> {
 
         println!("Connected to {}", address.to_string().bright_green().bold());
 
-        let retry = client_thread(camera, address, delay, input_socket).await?;
+        let retry = client_thread(camera, address, udp_port, delay, input_socket).await?;
 
         if !retry {
             break;
@@ -250,8 +252,8 @@ async fn main() -> std::io::Result<()> {
         ],
     );
     let mut camera = CallbackCamera::new(index, format, |_| {}).unwrap();
-    camera.open_stream().unwrap();
-    camera.poll_frame().unwrap();
+    // camera.open_stream().unwrap();
+    // camera.poll_frame().unwrap();
 
     let result = run(args, &mut camera).await;
 

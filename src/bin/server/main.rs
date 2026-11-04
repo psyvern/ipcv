@@ -8,7 +8,6 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use futures::SinkExt;
 use futures::StreamExt;
 use futures::channel::mpsc::UnboundedReceiver;
-use image::{ImageBuffer, Rgb};
 use indexmap::IndexMap;
 use ipcv::CustomSender;
 use ipcv::MapSender;
@@ -21,12 +20,12 @@ use ipcv::messages::Decode;
 use ipcv::messages::Encode;
 use ipcv::messages::ServerMessage;
 use jiff::Timestamp;
-use nokhwa::FormatDecoder;
-use nokhwa::pixel_format::RgbFormat;
 use nokhwa::utils::CameraFormat;
-use std::io::Write;
+use send_ctrlc::{Interruptible, InterruptibleCommand};
+use std::io::{BufReader, Read};
 use std::net::Ipv4Addr;
 use std::net::SocketAddr;
+use std::process::{ChildStderr, ChildStdout, Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::{fs::File, net::IpAddr, path::PathBuf};
@@ -108,7 +107,52 @@ fn print_clients(clients: &IndexMap<IpAddr, ClientInfo>) {
 struct ClientData {
     format: CameraFormat,
     address: SocketAddr,
+    udp_port: u16,
     name: String,
+}
+
+fn stdout_thread(
+    address: IpAddr,
+    stdout: ChildStdout,
+    output: flume::Sender<ServerEvent>,
+) -> std::io::Result<()> {
+    let mut stdout = BufReader::new(stdout);
+
+    let mut counter = 0;
+    let mut header = [0u8; 6];
+    loop {
+        stdout.read_exact(&mut header)?;
+
+        if !(header[0] == b'B' && header[1] == b'M') {
+            panic!("unexpected header: {header:?}");
+        }
+
+        let size = u32::from_le_bytes([header[2], header[3], header[4], header[5]]) as usize;
+
+        let mut buf = vec![0; size];
+        stdout.read_exact(&mut buf[6..])?;
+
+        let offset = u32::from_le_bytes([buf[10], buf[11], buf[12], buf[13]]) as usize;
+
+        let width = u32::from_le_bytes([buf[18], buf[19], buf[20], buf[21]]);
+        let height = u32::from_le_bytes([buf[22], buf[23], buf[24], buf[25]]);
+        let data = buf.split_off(offset);
+        let data = ipcv::bgr_to_rgba(data);
+
+        output
+            .send(ServerEvent::FrameReceived {
+                address,
+                frame_number: counter,
+                width,
+                height,
+                data,
+            })
+            .unwrap();
+
+        counter += 1;
+    }
+
+    Ok(())
 }
 
 async fn connection_thread(
@@ -119,8 +163,6 @@ async fn connection_thread(
     mut socket: impl CustomSender<ServerMessage>,
     output: flume::Sender<ServerEvent>,
 ) -> std::io::Result<()> {
-    let mut counter = 0u64;
-
     let mut reader = FramedRead::new(stream, ClientMessage::decoder());
 
     let directory = settings.output.join(format!(
@@ -138,15 +180,36 @@ async fn connection_thread(
     let mut interval_2 = tokio::time::interval(settings.update_interval * 5);
     interval_2.tick().await;
 
+    let mut command = Command::new("ffmpeg")
+        .args(["-hide_banner", "-v", "warning", "-y"])
+        .args(["-fflags", "nobuffer", "-flags", "low_delay", "-i"])
+        .arg(format!("udp://{}:{}", client.address.ip(), client.udp_port))
+        .arg(directory.join("output.ts"))
+        .args(["-vf", "transpose=2,transpose=2"])
+        .args(["-r", "0.25", "-f", "image2pipe", "-vcodec", "bmp", "pipe:1"])
+        .stderr(Stdio::inherit())
+        .stdout(Stdio::piped())
+        .spawn_interruptible()
+        .unwrap();
+
+    let stdout = command.stdout.take().unwrap();
+    let stdout_thread = std::thread::spawn(move || {
+        let result = stdout_thread(client.address.ip(), stdout, output);
+        if let Err(e) = result {
+            if e.kind() != std::io::ErrorKind::UnexpectedEof {
+                println!("{e:#?}");
+            }
+        }
+    });
+
     loop {
         select! {
-            biased;
             _ = token.cancelled() => {
                 break;
             }
             _ = interval.tick() => {
-                println!("Client not sending anything, closing...");
-                break;
+                // println!("Client not sending anything, closing...");
+                // break;
             }
             _ = interval_2.tick() => {
                 let _ = socket.send(ServerMessage::Heartbeat).await;
@@ -156,32 +219,23 @@ async fn connection_thread(
 
                 match amount {
                     ClientMessage::Close => break,
-                    ClientMessage::Frame(bytes) => {
-                        let bytes = RgbFormat::write_output(client.format.format(), client.format.resolution(), &bytes).unwrap();
-                        let frame = ImageBuffer::<Rgb<u8>, _>::from_vec(client.format.width(), client.format.height(), bytes).unwrap();
-
-                        let (_, _, data) = ipcv::generate_preview(&frame, client.format.width());
-
-                        let _ = output.send(ServerEvent::FrameReceived {
-                            address: client.address.ip(),
-                            frame_number: counter,
-                            width: client.format.width(),
-                            height: client.format.height(),
-                            data,
-                        });
-
-                        frame
-                            .save(directory.join(format!("{counter:05}.png")))
-                            .unwrap();
-                        println!("Received frame {} from {}", counter.to_string().bright_cyan().bold(), client.address.to_string().bright_green().bold());
-                        counter += 1;
-
-                        writeln!(log, "[{:?}] ciaooo {counter:05}", Instant::now())?;
-                    }
                 }
             }
         }
     }
+
+    command.terminate();
+
+    // TODO: temporary fix for block
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(1) {
+        match command.try_wait() {
+            Err(_) | Ok(Some(_)) => return Ok(()),
+            _ => {}
+        }
+    }
+
+    command.kill();
 
     Ok(())
 }
@@ -195,6 +249,7 @@ async fn loop_iteration(
     listener: &mut TcpListener,
     output: &mut flume::Sender<ServerEvent>,
     gui_rx: &mut UnboundedReceiver<InterfaceMessage>,
+    max_udp_port: &mut u16,
 ) -> Option<bool> {
     let mut data_socket_2 = UdpFramed::new(
         data_socket.clone(),
@@ -234,7 +289,7 @@ async fn loop_iteration(
                 InterfaceMessage::AcceptClient(address) => {
                     if let Some(client) = clients.get_mut(&address) {
                         if let Err(e) = data_socket_2.send((
-                            ServerMessage::Open { port: settings.tcp_port, interval: settings.update_interval },
+                            ServerMessage::Open { tcp_port: settings.tcp_port , udp_port: *max_udp_port, interval: settings.update_interval },
                             (address, client.port).into(),
                         )).await {
                             eprintln!("Cannot send Open to {address}: {e}");
@@ -268,6 +323,7 @@ async fn loop_iteration(
                             let client_data = ClientData {
                                 format: client.format,
                                 address,
+                                udp_port: *max_udp_port,
                                 name: client.host.clone(),
                             };
 
@@ -282,6 +338,8 @@ async fn loop_iteration(
                                 };
                                 address.ip()
                             });
+
+                            *max_udp_port += 1;
                         }
 
                         let _ = output.send(ServerEvent::ClientAccepted { address });
@@ -371,6 +429,7 @@ pub async fn server_loop(
         TcpListener::bind((ipcv::unspecified_from(args.group), args.tcp_port)).await?;
 
     let mut socket_2 = UdpFramed::new(socket.clone(), ServerMessage::encoder());
+    let mut max_udp_port = 5020;
 
     loop {
         let force = loop_iteration(
@@ -382,6 +441,7 @@ pub async fn server_loop(
             &mut listener,
             output,
             &mut gui_rx,
+            &mut max_udp_port,
         )
         .await;
 
@@ -468,7 +528,10 @@ fn main() -> iced::Result {
     });
 
     let _guard = runtime.enter();
-    gui::run(gui_tx, server_rx)
+
+    gui::run(gui_tx, server_rx)?;
+
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
