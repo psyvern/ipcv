@@ -1,7 +1,7 @@
 use clap::Parser;
 use colored::Colorize;
-use crossterm::event::{EventStream, KeyCode, KeyEvent, KeyModifiers};
-use futures::{FutureExt, SinkExt, StreamExt};
+use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyModifiers};
+use futures::{FutureExt, SinkExt, StreamExt, stream::BoxStream};
 use ipcv::{
     TermMode, is_closing_key,
     messages::{ClientInitialMessage, ClientMessage, Decode, Encode, ServerMessage},
@@ -12,6 +12,7 @@ use nokhwa::{
 };
 use send_ctrlc::{Interruptible, InterruptibleCommand};
 use std::{
+    io::IsTerminal,
     net::{IpAddr, SocketAddr},
     process::{Command, Stdio},
     time::Duration,
@@ -66,7 +67,7 @@ async fn wait_for_server(
     }
     .into_bytes();
 
-    let mut events = EventStream::new();
+    let mut events = key_events();
     let mut data = [0u8; 4096];
 
     let mut denied = false;
@@ -136,7 +137,7 @@ async fn client_thread(
         }
     };
     let mut output = FramedWrite::new(stream, ClientMessage::encoder());
-    let mut events = EventStream::new();
+    let mut events = key_events();
 
     let mut heartbeat = tokio::time::interval(time * 10);
     heartbeat.tick().await;
@@ -233,13 +234,27 @@ async fn run(args: Args, camera: &mut CallbackCamera) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Keyboard events. Without a terminal (when we start it with systemd)
+/// EventStream::new() panics, so it is replaced by a stream that never yields
+fn key_events() -> BoxStream<'static, std::io::Result<Event>> {
+    if std::io::stdin().is_terminal() {
+        EventStream::new().boxed()
+    } else {
+        futures::stream::pending().boxed()
+    }
+}
+
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     let args = Args::parse();
     println!("{args:?}");
 
     let stdin = std::io::stdin();
-    let old_term = TermMode::new(stdin)?;
+    let old_term = if stdin.is_terminal() {
+        Some(TermMode::new(stdin)?)
+    } else {
+        None
+    };
 
     let index = CameraIndex::Index(0);
     let format = RequestedFormat::with_formats(
