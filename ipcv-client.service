@@ -1,0 +1,14 @@
+[Unit]
+Description=ipcv client
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/ipcv-client
+DynamicUser=yes
+SupplementaryGroups=video
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
