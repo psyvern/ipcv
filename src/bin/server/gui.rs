@@ -29,7 +29,6 @@ pub fn run(
 struct ClientState {
     host: String,
     last_frame: Option<Allocation>,
-    frame_number: u64,
     waiting: bool,
 }
 
@@ -119,7 +118,6 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                     ClientState {
                         host,
                         last_frame: None,
-                        frame_number: 0,
                         waiting: true,
                     },
                 );
@@ -142,18 +140,11 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             }
             ServerEvent::FrameReceived {
                 address,
-                frame_number,
                 width,
                 height,
                 data,
             } => {
-                state.server_status = format!("Frame {} from {}", frame_number, address);
-
                 let handle = iced::widget::image::Handle::from_rgba(width, height, data);
-
-                if let Some(client) = state.clients.get_mut(&address) {
-                    client.frame_number = frame_number;
-                }
 
                 return iced::widget::image::allocate(handle)
                     .map(move |x| Message::ThumbnailAllocated(address, x));

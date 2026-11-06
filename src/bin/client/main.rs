@@ -137,6 +137,7 @@ async fn client_thread(
         }
     };
     let mut output = FramedWrite::new(stream, ClientMessage::encoder());
+
     let mut events = key_events();
 
     let mut heartbeat = tokio::time::interval(time * 10);
