@@ -12,7 +12,7 @@ flume = "0.12.0"
 futures = "0.3.34"
 hostname = "0.4.2"
 humantime = "2.4.0"
-iced = { version = "0.15.0-dev", features = ["image", "tokio"] }
+iced = { version = "0.15.0-dev", features = ["image", "svg", "tokio"] }
 image = "0.25.10"
 indexmap = "2.14.2"
 itertools = "0.15.0"
@@ -21,6 +21,7 @@ local-ip-address = "0.6.13"
 lucide-icons = { version = "1.45.0" }
 nokhwa = { version = "0.10.11", features = ["input-native", "output-threaded"] }
 open = "5.4.4"
+rust-fontconfig = { version = "5.0.2", features = ["parsing"] }
 send_ctrlc = "0.6.0"
 tokio = { version = "1.53.1", features = ["full"] }
 tokio-util = { version = "0.7.19", features = ["codec", "net"] }
@@ -30,4 +31,4 @@ termios = "0.3.3"
 
 [patch.crates-io]
 iced.git = "https://github.com/iced-rs/iced.git"
-iced.rev = "78606382bfae72e59a3274c792ca70c716553af5"
+iced.rev = "8ff48c42b0d5188223501ea1ccc506fd5beaf36a"
