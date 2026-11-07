@@ -9,10 +9,11 @@ clap = { version = "4.6.6", features = ["derive"] }
 colored = "3.1.1"
 crossterm = { version = "0.29.0", features = ["event-stream"] }
 flume = "0.12.0"
+fontconfig = "0.11.0"
 futures = "0.3.34"
 hostname = "0.4.2"
 humantime = "2.4.0"
-iced = { version = "0.15.0-dev", features = ["image", "tokio"] }
+iced = { version = "0.15.0-dev", features = ["image", "svg", "tokio"] }
 image = "0.25.10"
 indexmap = "2.14.2"
 itertools = "0.15.0"
@@ -30,4 +31,4 @@ termios = "0.3.3"
 
 [patch.crates-io]
 iced.git = "https://github.com/iced-rs/iced.git"
-iced.rev = "78606382bfae72e59a3274c792ca70c716553af5"
+iced.rev = "8ff48c42b0d5188223501ea1ccc506fd5beaf36a"

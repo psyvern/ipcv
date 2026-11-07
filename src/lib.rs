@@ -72,6 +72,7 @@ pub fn unspecified_from(address: IpAddr) -> IpAddr {
         IpAddr::V6(_) => Ipv6Addr::UNSPECIFIED.into(),
     }
 }
+
 pub fn bgra_to_rgba(frame: Vec<u8>) -> Vec<u8> {
     frame
         .into_iter()
@@ -79,6 +80,7 @@ pub fn bgra_to_rgba(frame: Vec<u8>) -> Vec<u8> {
         .flat_map(|(b, g, r, a)| [r, g, b, a])
         .collect()
 }
+
 pub fn generate_preview(
     frame: &ImageBuffer<Rgb<u8>, Vec<u8>>,
     max_width: u32,
