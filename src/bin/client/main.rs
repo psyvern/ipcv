@@ -145,10 +145,21 @@ async fn client_thread(
 
     // -vf "transpose=2,transpose=2"
     let mut command = Command::new("ffmpeg")
-        .args(["-hide_banner", "-v", "warning"])
+        .args(["-hide_banner", "-v", "info"])
         .args(["-re", "-hwaccel", "auto"])
-        .args(["-i", "/dev/video0"])
-        .args(["-framerate", "30", "-f", "mpegts"])
+        .args([
+            "-f",
+            "v4l2",
+            "-framerate",
+            "10",
+            "-video_size",
+            "1920x1080",
+            "-input_format",
+            "mjpeg",
+            "-i",
+            "/dev/video0",
+        ])
+        .args(["-f", "mpegts"])
         .arg(format!("udp:{}:{}", address.ip(), udp_port))
         .stderr(Stdio::inherit())
         .stdout(Stdio::piped())

@@ -11,8 +11,8 @@ use iced::widget::{
     span, stack, svg, text, tooltip,
 };
 use iced::{
-    Alignment, Border, Color, Font, Length, Shadow, Subscription, Task, Theme, Widget, color,
-    never, padding,
+    Alignment, Border, Degrees, Font, Length, Rotation, Shadow, Subscription, Task, Theme, Widget,
+    color, never, padding,
 };
 use indexmap::IndexMap;
 use jiff::Timestamp;
@@ -22,7 +22,7 @@ use std::hash::Hash;
 use std::net::{IpAddr, Ipv4Addr};
 
 use crate::executor::CustomExecutor;
-use crate::{InterfaceMessage, ServerEvent};
+use crate::{FFmpegProgress, InterfaceMessage, ServerEvent};
 
 const HYDRA_SVG: &[u8] = include_bytes!("../../../hydra.svg");
 
@@ -89,6 +89,8 @@ struct ClientState {
     host: String,
     last_frame: Option<Allocation>,
     waiting: bool,
+    progress: Option<FFmpegProgress>,
+    rotation: u8,
 }
 
 struct State {
@@ -174,6 +176,8 @@ impl State {
                         host: "ciaooodddo".to_owned(),
                         last_frame: None,
                         waiting: true,
+                        progress: None,
+                        rotation: 0,
                     },
                 ),
                 (
@@ -182,6 +186,8 @@ impl State {
                         host: "ciaooodsdso".to_owned(),
                         last_frame: None,
                         waiting: true,
+                        progress: None,
+                        rotation: 0,
                     },
                 ),
             ]
@@ -231,6 +237,8 @@ impl State {
                             host,
                             last_frame: None,
                             waiting: true,
+                            progress: None,
+                            rotation: 0,
                         },
                     );
                 }
@@ -262,20 +270,32 @@ impl State {
                     return iced::widget::image::allocate(handle)
                         .map(move |x| Message::ThumbnailAllocated(address, x));
                 }
+                ServerEvent::ProgressReceived { address, progress } => {
+                    if let Some(client) = self.clients.get_mut(&address) {
+                        client.progress = Some(progress);
+                    }
+                }
             },
             Message::Interface(cmd) => {
-                if let InterfaceMessage::Move(from, to) = cmd {
-                    self.clients.move_index(from, to);
-                }
-
-                if let InterfaceMessage::DenyClient(address) = cmd
-                    && let Some(client) = self.clients.get(&address)
-                {
-                    self.denied.insert(address, client.host.clone());
-                }
-
-                if let InterfaceMessage::AllowClient(address) = cmd {
-                    self.denied.shift_remove(&address);
+                match cmd {
+                    InterfaceMessage::Move(from, to) => {
+                        self.clients.move_index(from, to);
+                    }
+                    InterfaceMessage::DenyClient(address)
+                        if let Some(client) = self.clients.get(&address) =>
+                    {
+                        self.denied.insert(address, client.host.clone());
+                    }
+                    InterfaceMessage::AllowClient(address) => {
+                        self.denied.shift_remove(&address);
+                    }
+                    InterfaceMessage::Rotate(address) => {
+                        if let Some(client) = self.clients.get_mut(&address) {
+                            client.rotation += 1;
+                            client.rotation %= 4;
+                        }
+                    }
+                    _ => (),
                 }
 
                 let _ = self.gui_tx.unbounded_send(cmd);
@@ -529,7 +549,12 @@ fn view_client<'a>(
                 .boxed()
             } else {
                 if let Some(frame) = &client.last_frame {
-                    iced::widget::image(frame.handle()).border_radius(8).boxed()
+                    iced::widget::image(frame.handle())
+                        .border_radius(8)
+                        .rotation(Rotation::Solid(
+                            Degrees(client.rotation as f32 * 90.0).into(),
+                        ))
+                        .boxed()
                 } else {
                     column![
                         Icon::ImageOff.widget().size(96),
@@ -586,6 +611,7 @@ fn view_client<'a>(
                 ]
                 .size(14)
                 .on_link_click(never),
+                text(format!("{:#?}", client.progress)),
             ]
             .spacing(4),
         )
@@ -681,5 +707,3 @@ impl IconToWidget for Icon {
             .line_height(1.0)
     }
 }
-
-fn icon_button() {}
