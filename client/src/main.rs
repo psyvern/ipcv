@@ -153,14 +153,12 @@ async fn client_thread(
             "10",
             "-video_size",
             "1920x1080",
-            "-input_format",
-            "mjpeg",
             "-i",
             "/dev/video0",
         ])
         .args(["-f", "pulse", "-i", "default"])
         .args(["-f", "mpegts"])
-        .arg(format!("udp:{}:{}", address.ip(), udp_port))
+        .arg(format!("udp://{}:{}", address.ip(), udp_port))
         .stderr(Stdio::inherit())
         .stdout(Stdio::piped())
         .spawn_interruptible()

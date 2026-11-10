@@ -333,7 +333,7 @@ struct FFmpegThread {
 
 impl FFmpegThread {
     fn new(address: SocketAddr, directory: &Path, output: flume::Sender<ServerEvent>) -> Self {
-        let mut command = build_ffmpeg_command(address, directory);
+        let mut command = build_ffmpeg_command(address.port(), directory);
 
         let stdout = {
             let output = output.clone();
@@ -375,7 +375,7 @@ impl FFmpegThread {
     }
 }
 
-fn build_ffmpeg_command(address: SocketAddr, directory: &Path) -> send_ctrlc::InterruptibleChild {
+fn build_ffmpeg_command(port: u16, directory: &Path) -> send_ctrlc::InterruptibleChild {
     let ts_file = directory.join("output.ts");
 
     Command::new("ffmpeg")
@@ -393,7 +393,7 @@ fn build_ffmpeg_command(address: SocketAddr, directory: &Path) -> send_ctrlc::In
             "-re",
             "-i",
         ])
-        .arg(format!("udp://{address}"))
+        .arg(format!("udp://0.0.0.0:{}", port))
         .arg(ts_file)
         .args(["-vf", "scale=-1:270,transpose=1,transpose=1"])
         .args([
@@ -407,7 +407,6 @@ fn build_ffmpeg_command(address: SocketAddr, directory: &Path) -> send_ctrlc::In
             "bgra",
             "pipe:1",
         ])
-        // .env("AV_LOG_FORCE_COLOR", "1")
         .stderr(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn_interruptible()
