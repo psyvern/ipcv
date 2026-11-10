@@ -26,8 +26,6 @@ use std::net::{IpAddr, Ipv4Addr};
 use crate::executor::CustomExecutor;
 use crate::{FFmpegProgress, InterfaceMessage, ServerEvent};
 
-const HYDRA_SVG: &[u8] = include_bytes!("../../../hydra.svg");
-
 fn get_fonts() -> Option<(String, String)> {
     use fontconfig::{Fontconfig, Pattern};
     let fc = Fontconfig::new()?;
@@ -75,6 +73,8 @@ pub fn run(
     .title("hydra")
     .window(iced::window::Settings {
         exit_on_close_request: false,
+        icon: iced::window::icon::from_file_data(include_bytes!("../../../assets/logo.png"), None)
+            .ok(),
         platform_specific: iced::window::settings::PlatformSpecific {
             application_id: "hydra".to_owned(),
             ..Default::default()
@@ -361,7 +361,7 @@ impl State {
                 {
                     None => self.clients.keys().next(),
                     Some(index) => {
-                        if index == self.clients.len() {
+                        if index + 1 == self.clients.len() {
                             self.clients.keys().next()
                         } else {
                             self.clients.keys().nth(index + 1)
@@ -524,9 +524,11 @@ impl State {
         }
 
         let header = row![
-            svg(iced::widget::svg::Handle::from_memory(HYDRA_SVG))
-                .width(24)
-                .height(24),
+            svg(iced::widget::svg::Handle::from_memory(include_bytes!(
+                "../../../assets/logo.svg"
+            )))
+            .width(24)
+            .height(24),
             text("hydra")
                 .font(self.style.sans.weight(Weight::Semibold))
                 .size(20)
@@ -542,7 +544,7 @@ impl State {
                     .widget()
                     .size(24)
                 )
-                .padding(padding::all(0))
+                .padding(8)
                 .style(iced::widget::button::text)
                 .on_press(Message::ToggleSidebar),
                 if self.sidebar {
@@ -558,7 +560,7 @@ impl State {
         // .height(48)
         .align_y(Alignment::Center)
         .spacing(4)
-        .padding(8);
+        .padding(padding::left(8));
 
         let mut content = row![column![
             header,
@@ -580,7 +582,15 @@ impl State {
                                     text(address.to_string())
                                         .size(12)
                                         .font(self.style.monospace.weight(Weight::Medium))
-                                        .color(color!(0xFFFFFF, 0.65)),
+                                        .color(
+                                            self.style
+                                                .theme
+                                                .palette()
+                                                .background
+                                                .base
+                                                .text
+                                                .scale_alpha(0.75)
+                                        ),
                                     client
                                         .progress
                                         .as_ref()
@@ -608,7 +618,15 @@ impl State {
                                 text(time.strftime("%H:%M:%S").to_string())
                                     .size(12)
                                     .font(self.style.monospace.weight(Weight::Medium))
-                                    .color(color!(0xFFFFFF, 0.65)),
+                                    .color(
+                                        self.style
+                                            .theme
+                                            .palette()
+                                            .background
+                                            .base
+                                            .text
+                                            .scale_alpha(0.75)
+                                    ),
                                 text(x)
                             ]
                             .boxed()
