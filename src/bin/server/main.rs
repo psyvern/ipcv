@@ -600,8 +600,6 @@ async fn loop_iteration(
                         eprintln!("Cannot open folder: {e}");
                     }
                 }
-                InterfaceMessage::Move(_, _) => {}
-                InterfaceMessage::Rotate(_) => {}
                 InterfaceMessage::Shutdown { force } => {
                     return Some(force);
                 }
@@ -821,6 +819,4 @@ pub enum InterfaceMessage {
     DenyClient(IpAddr),
     OpenFolder(IpAddr),
     Shutdown { force: bool },
-    Move(usize, usize),
-    Rotate(IpAddr),
 }

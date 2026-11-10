@@ -95,19 +95,23 @@ struct ClientState {
     rotation: u8,
 }
 
-struct State {
-    log: Vec<(Timestamp, String)>,
-    clients: IndexMap<IpAddr, ClientState>,
-    selected_client: usize,
-    denied: IndexMap<IpAddr, String>,
-    sidebar: bool,
-    gui_tx: UnboundedSender<InterfaceMessage>,
+struct Style {
     theme: Theme,
-    font: Font,
+    sans: Font,
     monospace: Font,
 }
 
-fn keybind<M>(key: &str, modifiers: Modifiers, font: &Font) -> impl Widget<M> {
+struct State {
+    log: Vec<(Timestamp, String)>,
+    clients: IndexMap<IpAddr, ClientState>,
+    selected_client: Option<IpAddr>,
+    denied: IndexMap<IpAddr, String>,
+    sidebar: bool,
+    gui_tx: UnboundedSender<InterfaceMessage>,
+    style: Style,
+}
+
+fn keybind<M>(key: &str, modifiers: Modifiers, font: Font) -> impl Widget<M> {
     container(
         row![
             modifiers.control().then(|| Icon::ChevronUp.widget()),
@@ -142,7 +146,7 @@ fn keybind_tooltip<'a, M: 'a>(
     description: &'a str,
     key: &'a str,
     modifiers: Modifiers,
-    font: &'a Font,
+    font: Font,
 ) -> impl Widget<M> + 'a {
     tooltip(
         content,
@@ -180,7 +184,7 @@ impl State {
     ) -> Self {
         Self {
             log: Default::default(),
-            selected_client: usize::MAX,
+            selected_client: None,
             clients: [
                 (
                     IpAddr::V4(Ipv4Addr::new(255, 0, 1, 2)),
@@ -238,31 +242,33 @@ impl State {
             denied: IndexMap::default(),
             sidebar: false,
             gui_tx,
-            theme: Theme::custom(
-                "Darker",
-                Seed {
-                    background: color!(0x141318),
-                    text: color!(0xF0F0F0),
-                    primary: color!(0x5865F2),
-                    // success: color!(0x12664f),
-                    success: color!(0x7FFF7F),
-                    warning: color!(0xffc14e),
-                    danger: color!(0xc3423f),
+            style: Style {
+                theme: Theme::custom(
+                    "Darker",
+                    Seed {
+                        background: color!(0x141318),
+                        text: color!(0xF0F0F0),
+                        primary: color!(0x5865F2),
+                        // success: color!(0x12664f),
+                        success: color!(0x7FFF7F),
+                        warning: color!(0xffc14e),
+                        danger: color!(0xc3423f),
+                    },
+                ),
+                sans: match font {
+                    Some(x) => Font::with_family(x.as_str()),
+                    None => Font::DEFAULT,
                 },
-            ),
-            font: match font {
-                Some(x) => Font::with_family(x.as_str()),
-                None => Font::DEFAULT,
-            },
-            monospace: match monospace {
-                Some(x) => Font::with_family(x.as_str()),
-                None => Font::MONOSPACE,
+                monospace: match monospace {
+                    Some(x) => Font::with_family(x.as_str()),
+                    None => Font::MONOSPACE,
+                },
             },
         }
     }
 
     fn theme(&self) -> Theme {
-        self.theme.clone()
+        self.style.theme.clone()
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
@@ -325,9 +331,6 @@ impl State {
             },
             Message::Interface(cmd) => {
                 match cmd {
-                    InterfaceMessage::Move(from, to) => {
-                        self.clients.move_index(from, to);
-                    }
                     InterfaceMessage::DenyClient(address)
                         if let Some(client) = self.clients.get(&address) =>
                     {
@@ -335,12 +338,6 @@ impl State {
                     }
                     InterfaceMessage::AllowClient(address) => {
                         self.denied.shift_remove(&address);
-                    }
-                    InterfaceMessage::Rotate(address) => {
-                        if let Some(client) = self.clients.get_mut(&address) {
-                            client.rotation += 1;
-                            client.rotation %= 4;
-                        }
                     }
                     _ => (),
                 }
@@ -353,38 +350,70 @@ impl State {
                 }
             }
             Message::ToggleSidebar => self.sidebar = !self.sidebar,
-            Message::SelectClient(index) => {
-                self.selected_client = index;
+            Message::SelectClient(address) => {
+                self.selected_client = Some(address);
                 self.sidebar = true;
             }
             Message::SelectNext => {
-                let new = (self.selected_client + 1) % self.clients.len();
-                self.selected_client = new;
+                self.selected_client = match self
+                    .selected_client
+                    .and_then(|x| self.clients.get_index_of(&x))
+                {
+                    None => self.clients.keys().next(),
+                    Some(index) => {
+                        if index == self.clients.len() {
+                            self.clients.keys().next()
+                        } else {
+                            self.clients.keys().nth(index + 1)
+                        }
+                    }
+                }
+                .cloned()
             }
             Message::SelectPrevious => {
-                let new = if self.selected_client == 0 {
-                    self.clients.len() - 1
-                } else {
-                    self.selected_client - 1
-                };
-                self.selected_client = new;
+                self.selected_client = match self
+                    .selected_client
+                    .and_then(|x| self.clients.get_index_of(&x))
+                {
+                    None => self.clients.keys().last(),
+                    Some(index) => {
+                        if index == 0 {
+                            self.clients.keys().last()
+                        } else {
+                            self.clients.keys().nth(index - 1)
+                        }
+                    }
+                }
+                .cloned()
             }
             Message::SwapNext => {
-                let new = (self.selected_client + 1) % self.clients.len();
-                self.clients.swap_indices(self.selected_client, new);
-                self.selected_client = new;
+                if let Some(index) = self
+                    .selected_client
+                    .and_then(|x| self.clients.get_index_of(&x))
+                {
+                    let new = (index + 1) % self.clients.len();
+                    self.clients.swap_indices(index, new);
+                }
             }
             Message::SwapPrevious => {
-                let new = if self.selected_client == 0 {
-                    self.clients.len() - 1
-                } else {
-                    self.selected_client - 1
-                };
-                self.clients.swap_indices(self.selected_client, new);
-                self.selected_client = new;
+                if let Some(index) = self
+                    .selected_client
+                    .and_then(|x| self.clients.get_index_of(&x))
+                {
+                    let new = if index == 0 {
+                        self.clients.len() - 1
+                    } else {
+                        index - 1
+                    };
+
+                    self.clients.swap_indices(index, new);
+                }
             }
-            Message::RotateCurrent(clockwise) => {
-                if let Some((_, client)) = self.clients.get_index_mut(self.selected_client) {
+            Message::Move(from, to) => {
+                self.clients.move_index(from, to);
+            }
+            Message::Rotate(address, clockwise) => {
+                if let Some(client) = self.clients.get_mut(&address) {
                     client.rotation = if clockwise {
                         if client.rotation == 0 {
                             3
@@ -396,7 +425,12 @@ impl State {
                     };
                 }
             }
-            Message::Deselect => self.selected_client = usize::MAX,
+            Message::RotateCurrent(clockwise) => {
+                if let Some(selected) = self.selected_client {
+                    return self.update(Message::Rotate(selected, clockwise));
+                }
+            }
+            Message::Deselect => self.selected_client = None,
         }
 
         Task::none()
@@ -410,13 +444,11 @@ impl State {
             .map(|(index, (&address, client))| {
                 view_client(
                     index,
-                    index == self.selected_client,
+                    Some(address) == self.selected_client,
                     self.clients.len(),
                     address,
                     client,
-                    &self.theme,
-                    &self.font,
-                    &self.monospace,
+                    &self.style,
                 )
             }))
         .spacing(16)
@@ -496,7 +528,7 @@ impl State {
                 .width(24)
                 .height(24),
             text("hydra")
-                .font(self.font.weight(Weight::Semibold))
+                .font(self.style.sans.weight(Weight::Semibold))
                 .size(20)
                 .line_height(1.2),
             space().width(Length::Fill),
@@ -520,7 +552,7 @@ impl State {
                 },
                 "S",
                 Modifiers::CTRL | Modifiers::SHIFT,
-                &self.monospace,
+                self.style.monospace,
             ),
         ]
         // .height(48)
@@ -540,19 +572,19 @@ impl State {
             content = content.push(rule::vertical(2).boxed());
             content = content.push(
                 column![
-                    self.clients
-                        .get_index(self.selected_client)
+                    self.selected_client
+                        .and_then(|x| self.clients.get(&x).map(|y| (x, y)))
                         .map(|(address, client)| {
                             column![
                                 column![
                                     text(address.to_string())
                                         .size(12)
-                                        .font(self.monospace.weight(Weight::Medium))
+                                        .font(self.style.monospace.weight(Weight::Medium))
                                         .color(color!(0xFFFFFF, 0.65)),
                                     client
                                         .progress
                                         .as_ref()
-                                        .map(|x| view_progress(x, self.font).boxed())
+                                        .map(|x| view_progress(x, &self.style).boxed())
                                         .unwrap_or("<none>".boxed())
                                 ]
                                 .padding(8),
@@ -575,7 +607,7 @@ impl State {
                             column![
                                 text(time.strftime("%H:%M:%S").to_string())
                                     .size(12)
-                                    .font(self.monospace.weight(Weight::Medium))
+                                    .font(self.style.monospace.weight(Weight::Medium))
                                     .color(color!(0xFFFFFF, 0.65)),
                                 text(x)
                             ]
@@ -637,8 +669,10 @@ enum Message {
     Server(ServerEvent),
     Interface(InterfaceMessage),
     ThumbnailAllocated(IpAddr, Result<Allocation, iced::widget::image::Error>),
+    Move(usize, usize),
+    Rotate(IpAddr, bool),
     ToggleSidebar,
-    SelectClient(usize),
+    SelectClient(IpAddr),
     SelectNext,
     SelectPrevious,
     SwapNext,
@@ -659,9 +693,7 @@ fn view_client<'a>(
     max: usize,
     address: IpAddr,
     client: &'a ClientState,
-    theme: &Theme,
-    font: &Font,
-    monospace: &'a Font,
+    style: &'a Style,
 ) -> impl Widget<Message> + 'a {
     fn floating_button(theme: &Theme, status: button::Status) -> button::Style {
         button::Style {
@@ -711,11 +743,11 @@ fn view_client<'a>(
                             button(Icon::RotateCwSquare.widget().size(22))
                                 .style(floating_button)
                                 .padding(4)
-                                .on_press(InterfaceMessage::Rotate(address).into()),
+                                .on_press(Message::Rotate(address, false)),
                             "Rotate",
                             "R",
                             Modifiers::NONE,
-                            monospace,
+                            style.monospace,
                         )),
                         space().width(Length::Fill),
                         keybind_tooltip(
@@ -723,29 +755,24 @@ fn view_client<'a>(
                                 .style(floating_button)
                                 .padding(4)
                                 .on_press_maybe(
-                                    (index > 0)
-                                        .then(|| InterfaceMessage::Move(index, index - 1).into())
+                                    (index > 0).then(|| Message::Move(index, index - 1))
                                 ),
                             "Move left",
                             "←",
                             Modifiers::SHIFT,
-                            monospace,
+                            style.monospace,
                         ),
                         keybind_tooltip(
                             button(Icon::ArrowRight.widget().size(22))
                                 .style(floating_button)
                                 .padding(4)
                                 .on_press_maybe(
-                                    (index + 1 < max).then(|| InterfaceMessage::Move(
-                                        index,
-                                        index + 1
-                                    )
-                                    .into()),
+                                    (index + 1 < max).then(|| Message::Move(index, index + 1)),
                                 ),
                             "Move right",
                             "→",
                             Modifiers::SHIFT,
-                            monospace
+                            style.monospace
                         )
                     ]
                     .spacing(8),
@@ -788,7 +815,7 @@ fn view_client<'a>(
                                 "Open directory",
                                 "E",
                                 Modifiers::NONE,
-                                monospace,
+                                style.monospace,
                             ),
                             keybind_tooltip(
                                 button(Icon::Unplug.widget().size(22))
@@ -808,7 +835,7 @@ fn view_client<'a>(
                                 "Disconnect",
                                 "X",
                                 Modifiers::NONE,
-                                monospace,
+                                style.monospace,
                             ),
                         ]
                     }
@@ -828,18 +855,17 @@ fn view_client<'a>(
             column![
                 rich_text![
                     span("Host: "),
-                    span(&client.host).font(font.weight(Weight::Bold))
+                    span(&client.host).font(style.sans.weight(Weight::Bold))
                 ]
                 .ellipsis(Ellipsis::End)
-                // .wrapping(text::Wrapping::None)
                 .size(16)
                 .on_link_click(never),
                 rich_text![
                     span("Address: "),
-                    span(address.to_string()).font(font.weight(Weight::Bold)),
+                    span(address.to_string()).font(style.sans.weight(Weight::Bold)),
                     span(":5009")
-                        .font(font.weight(Weight::Bold))
-                        .color(theme.palette().primary.strong.color)
+                        .font(style.sans.weight(Weight::Bold))
+                        .color(style.theme.palette().primary.strong.color)
                 ]
                 .size(14)
                 .on_link_click(never),
@@ -880,11 +906,12 @@ fn view_client<'a>(
     button(client_col)
         .style(move |a, b| custom_style(selected, a, b))
         .padding(8)
-        .on_press(Message::SelectClient(index))
+        .on_press(Message::SelectClient(address))
 }
 
-fn view_progress<'a>(progress: &'a FFmpegProgress, font: Font) -> impl Widget<Message> + 'a {
-    let bold = Font::with_family("Fira Code").weight(Weight::Bold);
+fn view_progress<'a>(progress: &'a FFmpegProgress, style: &Style) -> impl Widget<Message> + 'a {
+    let bold = style.monospace.weight(Weight::Bold);
+
     row![
         column!["Frame", "FPS", "Quality", "Bitrate", "Time", "Speed"].align_x(Alignment::End),
         column![
