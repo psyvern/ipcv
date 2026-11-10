@@ -104,7 +104,11 @@ pub struct Args {
 
 #[derive(Debug)]
 enum ClientStatus {
-    Connected(tokio::sync::mpsc::Sender<InfraThreadMessage>, u16),
+    Connected {
+        sender: tokio::sync::mpsc::Sender<InfraThreadMessage>,
+        port: u16,
+        directory: PathBuf,
+    },
     Waiting,
 }
 
@@ -145,6 +149,7 @@ struct ClientData {
     address: SocketAddr,
     udp_port: u16,
     name: String,
+    directory: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -434,15 +439,9 @@ async fn connection_thread(
 ) -> std::io::Result<()> {
     let mut reader = FramedRead::new(stream, ClientMessage::decoder());
 
-    let directory = settings.output.join(format!(
-        "{:?} - {}",
-        Timestamp::now().as_second(),
-        client.name
-    ));
-    let _ = std::fs::remove_dir_all(&directory);
-    std::fs::create_dir(&directory)?;
+    std::fs::create_dir(&client.directory)?;
 
-    let mut log = File::create(directory.join("output.log"))?;
+    let mut log = File::create(client.directory.join("output.log"))?;
 
     let mut interval = tokio::time::interval(settings.update_interval * 10);
     interval.tick().await;
@@ -451,7 +450,7 @@ async fn connection_thread(
 
     let ffmpeg = FFmpegThread::new(
         (client.address.ip(), client.udp_port).into(),
-        &directory,
+        &client.directory,
         output,
     );
 
@@ -504,7 +503,7 @@ async fn loop_iteration(
                 InterfaceMessage::PrintClients => print_clients(clients),
                 InterfaceMessage::DisconnectClient(address) => {
                     if let Some(client) = clients.get_mut(&address)
-                        && let ClientStatus::Connected(sender, _) = &client.status {
+                        && let ClientStatus::Connected { sender, .. } = &client.status {
                             println!("Closing connection to `{}`", client.host);
                             let msg = ServerMessage::Close { force: false };
                             let _ = data_socket_2.send((msg, (address, client.port).into())).await;
@@ -530,7 +529,7 @@ async fn loop_iteration(
                 }
                 InterfaceMessage::AcceptClient(address) => {
                     let Some(udp_port) = ((settings.port + 1)..(settings.port + 1 + settings.udp_ports as u16))
-                        .find(|port| !clients.iter().any(|(_, x)| matches!(x.status, ClientStatus::Connected(_, x) if x == *port)))
+                        .find(|port| !clients.iter().any(|(_, x)| matches!(x.status, ClientStatus::Connected { port: x, .. } if x == *port)))
                      else {
                             eprintln!("No UDP port left for {address}");
                             return None;
@@ -547,6 +546,12 @@ async fn loop_iteration(
                         }
 
                         let (infra_thread_tx, infra_thread_rx) = tokio::sync::mpsc::channel(10);
+                        let directory = settings.output.join(format!(
+                            "{:?} - {}",
+                            Timestamp::now().as_second(),
+                            client.host,
+                        ));
+
                         {
                             //let mut denied = false;
                             let settings = settings.clone();
@@ -573,6 +578,7 @@ async fn loop_iteration(
                                 address,
                                 udp_port,
                                 name: client.host.clone(),
+                                directory: directory.clone(),
                             };
 
                             let socket = MapSender::new(
@@ -591,13 +597,18 @@ async fn loop_iteration(
 
                         let _ = output.send(ServerEvent::ClientAccepted { address });
 
-                        client.status = ClientStatus::Connected(infra_thread_tx, udp_port);
+                        client.status = ClientStatus::Connected {
+                            sender: infra_thread_tx,
+                            port: udp_port,
+                            directory,
+                        };
                     }
                 }
                 InterfaceMessage::OpenFolder(address) => {
-                    let path = settings.output.join(address.to_string());
-                    if let Err(e) = open::that_detached(path) {
-                        eprintln!("Cannot open folder: {e}");
+                    if let Some(ClientStatus::Connected { directory, ..}) = clients.get(&address).map(|x| &x.status) {
+                        if let Err(e) = open::that_detached(directory) {
+                            eprintln!("Cannot open folder: {e}");
+                        }
                     }
                 }
                 InterfaceMessage::Shutdown { force } => {
@@ -691,7 +702,7 @@ pub async fn server_loop(
 
         if let Some(force) = force {
             for (address, info) in clients {
-                if let ClientStatus::Connected(sender, _) = info.status {
+                if let ClientStatus::Connected { sender, .. } = info.status {
                     println!("Closing connection to `{}`", info.host);
                     socket_2
                         .send((ServerMessage::Close { force }, (address, info.port).into()))
