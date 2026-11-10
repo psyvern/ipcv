@@ -73,7 +73,7 @@ pub fn run(
     .title("hydra")
     .window(iced::window::Settings {
         exit_on_close_request: false,
-        icon: iced::window::icon::from_file_data(include_bytes!("../../../assets/logo.png"), None)
+        icon: iced::window::icon::from_file_data(include_bytes!("../../assets/logo.png"), None)
             .ok(),
         platform_specific: iced::window::settings::PlatformSpecific {
             application_id: "hydra".to_owned(),
@@ -525,7 +525,7 @@ impl State {
 
         let header = row![
             svg(iced::widget::svg::Handle::from_memory(include_bytes!(
-                "../../../assets/logo.svg"
+                "../../assets/logo.svg"
             )))
             .width(24)
             .height(24),

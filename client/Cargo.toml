@@ -1,0 +1,16 @@
+[package]
+name = "client"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap.workspace = true
+colored.workspace = true
+crossterm.workspace = true
+futures.workspace = true
+hostname.workspace = true
+library.path = "../library"
+nokhwa.workspace = true
+send_ctrlc.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true

@@ -9,17 +9,17 @@ use futures::SinkExt;
 use futures::StreamExt;
 use futures::channel::mpsc::UnboundedReceiver;
 use indexmap::IndexMap;
-use ipcv::CustomSender;
-use ipcv::MapSender;
-use ipcv::TermMode;
-use ipcv::is_closing_key;
-use ipcv::messages::ClientInitialMessage;
-use ipcv::messages::ClientMessage;
-use ipcv::messages::CustomCodec;
-use ipcv::messages::Decode;
-use ipcv::messages::Encode;
-use ipcv::messages::ServerMessage;
 use jiff::Timestamp;
+use library::CustomSender;
+use library::MapSender;
+use library::TermMode;
+use library::is_closing_key;
+use library::messages::ClientInitialMessage;
+use library::messages::ClientMessage;
+use library::messages::CustomCodec;
+use library::messages::Decode;
+use library::messages::Encode;
+use library::messages::ServerMessage;
 use nokhwa::utils::CameraFormat;
 use send_ctrlc::{Interruptible, InterruptibleChild, InterruptibleCommand};
 use std::collections::HashMap;
@@ -306,7 +306,7 @@ fn stdout_thread(
         let width = u32::from_le_bytes([buf[18], buf[19], buf[20], buf[21]]);
         let height = u32::from_le_bytes([buf[22], buf[23], buf[24], buf[25]]);
         let data = buf.split_off(offset);
-        let data = ipcv::bgra_to_rgba(data);
+        let data = library::bgra_to_rgba(data);
 
         output
             .send(ServerEvent::FrameReceived {
@@ -673,7 +673,8 @@ pub async fn server_loop(
         None
     };
 
-    let socket = Arc::new(UdpSocket::bind((ipcv::unspecified_from(args.group), args.port)).await?);
+    let socket =
+        Arc::new(UdpSocket::bind((library::unspecified_from(args.group), args.port)).await?);
     match args.group {
         IpAddr::V4(address) => socket.join_multicast_v4(address, args.interface),
         IpAddr::V6(address) => socket.join_multicast_v6(&address, 0),
@@ -683,7 +684,7 @@ pub async fn server_loop(
     let mut recently_denied = std::collections::HashMap::new();
     let mut join_set = JoinSet::new();
     let mut listener =
-        TcpListener::bind((ipcv::unspecified_from(args.group), args.tcp_port)).await?;
+        TcpListener::bind((library::unspecified_from(args.group), args.tcp_port)).await?;
 
     let mut socket_2 = UdpFramed::new(socket.clone(), ServerMessage::encoder());
 

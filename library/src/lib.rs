@@ -7,7 +7,6 @@ use std::{
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use futures::{Sink, SinkExt};
-use image::{ImageBuffer, Rgb};
 use itertools::Itertools;
 
 pub fn is_closing_key(event: KeyEvent) -> bool {
@@ -79,39 +78,6 @@ pub fn bgra_to_rgba(frame: Vec<u8>) -> Vec<u8> {
         .tuples()
         .flat_map(|(b, g, r, a)| [r, g, b, a])
         .collect()
-}
-
-pub fn generate_preview(
-    frame: &ImageBuffer<Rgb<u8>, Vec<u8>>,
-    max_width: u32,
-) -> (u32, u32, Vec<u8>) {
-    let width = frame.width();
-    let height = frame.height();
-
-    let (new_width, new_height, resized) = if width > max_width {
-        let scale = max_width as f32 / width as f32;
-        let new_width = max_width;
-        let new_height = (height as f32 * scale) as u32;
-        (
-            new_width,
-            new_height,
-            image::imageops::resize(
-                frame,
-                new_width,
-                new_height,
-                image::imageops::FilterType::Nearest,
-            ),
-        )
-    } else {
-        (width, height, frame.clone())
-    };
-
-    let mut rgba = Vec::with_capacity((new_width * new_height * 4) as usize);
-    for pixel in resized.pixels() {
-        rgba.extend_from_slice(&[pixel[0], pixel[1], pixel[2], 255]);
-    }
-
-    (new_width, new_height, rgba)
 }
 
 #[derive(Clone)]

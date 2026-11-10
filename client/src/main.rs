@@ -2,7 +2,7 @@ use clap::Parser;
 use colored::Colorize;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyModifiers};
 use futures::{FutureExt, SinkExt, StreamExt, stream::BoxStream};
-use ipcv::{
+use library::{
     TermMode, is_closing_key,
     messages::{ClientInitialMessage, ClientMessage, Decode, Encode, ServerMessage},
 };
@@ -48,11 +48,11 @@ async fn wait_for_server(
     camera_format: CameraFormat,
     name: Option<&str>,
 ) -> std::io::Result<Option<(SocketAddr, u16, Duration, UdpSocket)>> {
-    let output = UdpSocket::bind((ipcv::unspecified_from(group), 0)).await?;
+    let output = UdpSocket::bind((library::unspecified_from(group), 0)).await?;
     output.set_ttl(2)?;
     output.connect((group, port)).await?;
 
-    let input_socket = UdpSocket::bind((ipcv::unspecified_from(group), 0)).await?;
+    let input_socket = UdpSocket::bind((library::unspecified_from(group), 0)).await?;
     // input_socket.set_timeout(5);
 
     let listening_port = input_socket.local_addr()?.port();
