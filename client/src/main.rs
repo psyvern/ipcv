@@ -158,7 +158,7 @@ async fn client_thread(
             "-i",
             "/dev/video0",
         ])
-        .args(["-f", "alsa", "-i", "hw:0,0"])
+        .args(["-f", "pulse", "-i", "default"])
         .args(["-f", "mpegts"])
         .arg(format!("udp:{}:{}", address.ip(), udp_port))
         .stderr(Stdio::inherit())
