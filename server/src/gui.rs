@@ -27,24 +27,29 @@ use crate::executor::CustomExecutor;
 use crate::{FFmpegProgress, InterfaceMessage, ServerEvent};
 
 fn get_fonts() -> Option<(String, String)> {
-    use fontconfig::{Fontconfig, Pattern};
-    let fc = Fontconfig::new()?;
+    cfg_select! {
+        unix => {
+            use fontconfig::{Fontconfig, Pattern};
+            let fc = Fontconfig::new()?;
 
-    let mut pattern = Pattern::new(&fc).ok()?;
-    pattern
-        .add_string(fontconfig::FC_FAMILY, &CString::new("sans").ok()?)
-        .ok()?;
-    let pattern = pattern.font_match().ok()?;
-    let sans = pattern.get_string(fontconfig::FC_FAMILY).ok()?.to_owned();
+            let mut pattern = Pattern::new(&fc).ok()?;
+            pattern
+                .add_string(fontconfig::FC_FAMILY, &CString::new("sans").ok()?)
+                .ok()?;
+            let pattern = pattern.font_match().ok()?;
+            let sans = pattern.get_string(fontconfig::FC_FAMILY).ok()?.to_owned();
 
-    let mut pattern = Pattern::new(&fc).ok()?;
-    pattern
-        .add_string(fontconfig::FC_FAMILY, &CString::new("monospace").ok()?)
-        .ok()?;
-    let pattern = pattern.font_match().ok()?;
-    let monospace = pattern.get_string(fontconfig::FC_FAMILY).ok()?.to_owned();
+            let mut pattern = Pattern::new(&fc).ok()?;
+            pattern
+                .add_string(fontconfig::FC_FAMILY, &CString::new("monospace").ok()?)
+                .ok()?;
+            let pattern = pattern.font_match().ok()?;
+            let monospace = pattern.get_string(fontconfig::FC_FAMILY).ok()?.to_owned();
 
-    Some((sans, monospace))
+            Some((sans, monospace))
+        }
+        _ => None
+    }
 }
 
 pub fn run(
