@@ -147,13 +147,14 @@ struct ClientData {
     name: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 enum LogLevel {
     Info,
     Warning,
     Error,
 }
 
+#[derive(Debug, Clone)]
 struct LogLine {
     level: LogLevel,
     parts: Vec<String>,
@@ -216,6 +217,8 @@ fn stderr_thread(
             break;
         }
 
+        let line = line.trim_end_matches('\n');
+
         if let Some((key, value)) = line.split_once('=')
             && key
                 .chars()
@@ -233,7 +236,7 @@ fn stderr_thread(
             }
         } else {
             let mut parts = Vec::new();
-            let mut line = line.as_str();
+            let mut line = line;
             while let Some(new) = line.strip_prefix('[') {
                 if let Some((part, new)) = new.split_once("] ") {
                     parts.push(part);
@@ -246,7 +249,7 @@ fn stderr_thread(
             match level {
                 Some(level) => {
                     if let Some(line) = last_line {
-                        print!("{line}");
+                        output.send(ServerEvent::LogReceived { address, log: line });
                     }
 
                     last_line = Some(LogLine {
@@ -257,6 +260,7 @@ fn stderr_thread(
                 }
                 None => {
                     if let Some(last_line) = &mut last_line {
+                        last_line.line.push('\n');
                         last_line.line.push_str(line);
                     }
                 }
@@ -265,7 +269,7 @@ fn stderr_thread(
     }
 
     if let Some(line) = last_line {
-        print!("{line}");
+        output.send(ServerEvent::LogReceived { address, log: line });
     }
 
     Ok(())
@@ -367,10 +371,10 @@ impl FFmpegThread {
 }
 
 fn build_ffmpeg_command(address: SocketAddr, directory: &Path) -> send_ctrlc::InterruptibleChild {
-    let ts_file = directory.join(format!("output.ts"));
+    let ts_file = directory.join("output.ts");
 
     Command::new("ffmpeg")
-        .args(["-hide_banner", "-v", "level+info"])
+        .args(["-hide_banner", "-v", "level+warning"])
         .args(["-nostats", "-stats_period", "1", "-progress", "pipe:2"])
         .args([
             // "-probesize",
@@ -801,6 +805,10 @@ pub enum ServerEvent {
     ProgressReceived {
         address: IpAddr,
         progress: FFmpegProgress,
+    },
+    LogReceived {
+        address: IpAddr,
+        log: LogLine,
     },
 }
 

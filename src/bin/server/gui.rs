@@ -2,13 +2,15 @@ use futures::StreamExt;
 use futures::channel::mpsc::UnboundedSender;
 use iced::border::rounded;
 use iced::font::Weight;
+use iced::keyboard::key::Named;
 use iced::keyboard::{Key, Modifiers};
 use iced::theme::palette::Seed;
 use iced::widget::image::Allocation;
 use iced::widget::scrollable::Scrollbar;
+use iced::widget::text::Ellipsis;
 use iced::widget::{
-    Scrollable, button, column, container, responsive, rich_text, row, rule, scrollable, space,
-    span, stack, svg, text, tooltip,
+    Scrollable, button, center, column, container, responsive, rich_text, row, rule, scrollable,
+    space, span, stack, svg, text, tooltip,
 };
 use iced::{
     Alignment, Border, Degrees, Font, Length, Rotation, Shadow, Subscription, Task, Theme, Widget,
@@ -96,6 +98,7 @@ struct ClientState {
 struct State {
     log: Vec<(Timestamp, String)>,
     clients: IndexMap<IpAddr, ClientState>,
+    selected_client: usize,
     denied: IndexMap<IpAddr, String>,
     sidebar: bool,
     gui_tx: UnboundedSender<InterfaceMessage>,
@@ -104,19 +107,20 @@ struct State {
     monospace: Font,
 }
 
-fn keybind_desc<'a, M: 'a>(desc: &'a str, key: &'a str, font: &'a Font) -> impl Widget<M> + 'a {
-    row![desc, keybind(key, font)]
-        .spacing(8)
-        .align_y(Alignment::Center)
-}
-
-fn keybind<M>(text: &str, font: &Font) -> impl Widget<M> {
+fn keybind<M>(key: &str, modifiers: Modifiers, font: &Font) -> impl Widget<M> {
     container(
-        iced::widget::text(text)
-            .font(font.weight(Weight::Semibold))
-            .line_height(1.0),
+        row![
+            modifiers.control().then(|| Icon::ChevronUp.widget()),
+            modifiers.shift().then(|| Icon::ArrowBigUpDash.widget()),
+            modifiers.alt().then(|| Icon::Option.widget()),
+            modifiers.logo().then(|| Icon::Command.widget()),
+            iced::widget::text(key)
+                .font(font.weight(Weight::Semibold))
+                .line_height(1.0),
+        ]
+        .spacing(4),
     )
-    .padding([6, 6])
+    .padding(6)
     .style(|theme: &Theme| {
         let palette = theme.palette();
 
@@ -126,10 +130,41 @@ fn keybind<M>(text: &str, font: &Font) -> impl Widget<M> {
             border: Border {
                 width: 1.0,
                 radius: 6.into(),
-                color: palette.background.neutral.color,
+                color: palette.background.strong.color,
             },
             ..Default::default()
         }
+    })
+}
+
+fn keybind_tooltip<'a, M: 'a>(
+    content: impl Widget<M> + 'a,
+    description: &'a str,
+    key: &'a str,
+    modifiers: Modifiers,
+    font: &'a Font,
+) -> impl Widget<M> + 'a {
+    tooltip(
+        content,
+        row![description, keybind(key, modifiers, font)]
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .padding(8),
+        tooltip::Position::Bottom,
+    )
+    .gap(4)
+    .style(|t: &Theme| container::Style {
+        border: Border {
+            width: 1.0,
+            radius: 8.0.into(),
+            color: t.palette().background.neutral.color,
+        },
+        shadow: Shadow {
+            color: color!(0, 0.5),
+            blur_radius: 8.0,
+            ..Default::default()
+        },
+        ..container::bordered_box(t)
     })
 }
 
@@ -145,31 +180,38 @@ impl State {
     ) -> Self {
         Self {
             log: Default::default(),
+            selected_client: usize::MAX,
             clients: [
-                // (
-                //     IpAddr::V4(Ipv4Addr::new(255, 0, 1, 2)),
-                //     ClientState {
-                //         host: "ciaoooo".to_owned(),
-                //         last_frame: None,
-                //         waiting: true,
-                //     },
-                // ),
-                // (
-                //     IpAddr::V4(Ipv4Addr::new(25, 0, 1, 2)),
-                //     ClientState {
-                //         host: "ciaooodddo".to_owned(),
-                //         last_frame: None,
-                //         waiting: true,
-                //     },
-                // ),
-                // (
-                //     IpAddr::V4(Ipv4Addr::new(5, 0, 1, 2)),
-                //     ClientState {
-                //         host: "ciaooodsdso".to_owned(),
-                //         last_frame: None,
-                //         waiting: true,
-                //     },
-                // ),
+                (
+                    IpAddr::V4(Ipv4Addr::new(255, 0, 1, 2)),
+                    ClientState {
+                        host: "ciaoooo".to_owned(),
+                        last_frame: None,
+                        waiting: true,
+                        progress: None,
+                        rotation: 0,
+                    },
+                ),
+                (
+                    IpAddr::V4(Ipv4Addr::new(25, 0, 1, 2)),
+                    ClientState {
+                        host: "ciaooodddo".to_owned(),
+                        last_frame: None,
+                        waiting: true,
+                        progress: None,
+                        rotation: 0,
+                    },
+                ),
+                (
+                    IpAddr::V4(Ipv4Addr::new(5, 0, 1, 2)),
+                    ClientState {
+                        host: "ciaooodsdso".to_owned(),
+                        last_frame: None,
+                        waiting: true,
+                        progress: None,
+                        rotation: 0,
+                    },
+                ),
                 (
                     IpAddr::V4(Ipv4Addr::new(25, 2, 1, 2)),
                     ClientState {
@@ -275,6 +317,11 @@ impl State {
                         client.progress = Some(progress);
                     }
                 }
+                ServerEvent::LogReceived { address, log } => {
+                    if let Some(client) = self.clients.get_mut(&address) {
+                        self.log(format!("{address}: {}", log.line));
+                    }
+                }
             },
             Message::Interface(cmd) => {
                 match cmd {
@@ -306,6 +353,50 @@ impl State {
                 }
             }
             Message::ToggleSidebar => self.sidebar = !self.sidebar,
+            Message::SelectClient(index) => {
+                self.selected_client = index;
+                self.sidebar = true;
+            }
+            Message::SelectNext => {
+                let new = (self.selected_client + 1) % self.clients.len();
+                self.selected_client = new;
+            }
+            Message::SelectPrevious => {
+                let new = if self.selected_client == 0 {
+                    self.clients.len() - 1
+                } else {
+                    self.selected_client - 1
+                };
+                self.selected_client = new;
+            }
+            Message::SwapNext => {
+                let new = (self.selected_client + 1) % self.clients.len();
+                self.clients.swap_indices(self.selected_client, new);
+                self.selected_client = new;
+            }
+            Message::SwapPrevious => {
+                let new = if self.selected_client == 0 {
+                    self.clients.len() - 1
+                } else {
+                    self.selected_client - 1
+                };
+                self.clients.swap_indices(self.selected_client, new);
+                self.selected_client = new;
+            }
+            Message::RotateCurrent(clockwise) => {
+                if let Some((_, client)) = self.clients.get_index_mut(self.selected_client) {
+                    client.rotation = if clockwise {
+                        if client.rotation == 0 {
+                            3
+                        } else {
+                            client.rotation - 1
+                        }
+                    } else {
+                        (client.rotation + 1) % 4
+                    };
+                }
+            }
+            Message::Deselect => self.selected_client = usize::MAX,
         }
 
         Task::none()
@@ -319,23 +410,22 @@ impl State {
             .map(|(index, (&address, client))| {
                 view_client(
                     index,
+                    index == self.selected_client,
                     self.clients.len(),
                     address,
                     client,
                     &self.theme,
                     &self.font,
+                    &self.monospace,
                 )
             }))
         .spacing(16)
         .padding(8)
         .wrap()
-        .vertical_spacing(16)
-        .align_x(Alignment::Center);
+        .vertical_spacing(16);
 
         let clients = Scrollable::with_direction(
-            container(clients)
-                .width(Length::Fill)
-                .align_x(Alignment::Center),
+            center(clients),
             scrollable::Direction::Vertical(Scrollbar::new().spacing(0).padding(8)),
         )
         .height(Length::Fill);
@@ -410,7 +500,7 @@ impl State {
                 .size(20)
                 .line_height(1.2),
             space().width(Length::Fill),
-            tooltip(
+            keybind_tooltip(
                 button(
                     if self.sidebar {
                         Icon::PanelRightClose
@@ -423,18 +513,14 @@ impl State {
                 .padding(padding::all(0))
                 .style(iced::widget::button::text)
                 .on_press(Message::ToggleSidebar),
-                container(keybind_desc(
-                    if self.sidebar {
-                        "Close sidebar"
-                    } else {
-                        "Open sidebar"
-                    },
-                    "CTRL+SHIFT+S",
-                    &self.monospace
-                ))
-                .padding(8)
-                .style(container::bordered_box),
-                tooltip::Position::Bottom,
+                if self.sidebar {
+                    "Close sidebar"
+                } else {
+                    "Open sidebar"
+                },
+                "S",
+                Modifiers::CTRL | Modifiers::SHIFT,
+                &self.monospace,
             ),
         ]
         // .height(48)
@@ -451,36 +537,55 @@ impl State {
         ]];
 
         if self.sidebar {
-            content = content.push(rule::vertical(2).boxed()).push(
-                container(
-                    column(self.log.iter().map(|(time, x)| {
-                        column![
-                            text(time.strftime("%H:%M:%S").to_string())
-                                .size(12)
-                                .font(self.monospace.weight(Weight::Medium))
-                                .color(color!(0xFFFFFF, 0.65)),
-                            text(x)
-                        ]
-                        .boxed()
-                    }))
-                    // .push(
-                    //     row([
-                    //         (Icon::BadgeQuestionMark, 0x66ccff),
-                    //         (Icon::Info, 0x99ffcc),
-                    //         (Icon::TriangleExclamationPoint, 0xffff99),
-                    //         (Icon::OctagonX, 0xff9999),
-                    //     ]
-                    //     .into_iter()
-                    //     .map(|(icon, color)| {
-                    //         icon.widget().size(24).color(Color::from_packed_rgb8(color))
-                    //     }))
-                    //     .spacing(8)
-                    //     .boxed(),
-                    // )
-                    .spacing(8)
-                    .width(320),
-                )
-                .padding(8)
+            content = content.push(rule::vertical(2).boxed());
+            content = content.push(
+                column![
+                    self.clients
+                        .get_index(self.selected_client)
+                        .map(|(address, client)| {
+                            column![
+                                column![
+                                    text(address.to_string())
+                                        .size(12)
+                                        .font(self.monospace.weight(Weight::Medium))
+                                        .color(color!(0xFFFFFF, 0.65)),
+                                    client
+                                        .progress
+                                        .as_ref()
+                                        .map(|x| view_progress(x, self.font).boxed())
+                                        .unwrap_or("<none>".boxed())
+                                ]
+                                .padding(8),
+                                rule::horizontal(2),
+                            ]
+                        }),
+                    // row([
+                    //     (Icon::BadgeQuestionMark, 0x66ccff),
+                    //     (Icon::Info, 0x99ffcc),
+                    //     (Icon::TriangleExclamationPoint, 0xffff99),
+                    //     (Icon::OctagonX, 0xff9999),
+                    // ]
+                    // .into_iter()
+                    // .map(|(icon, color)| {
+                    //     icon.widget().size(24).color(Color::from_packed_rgb8(color))
+                    // }))
+                    // .spacing(8),
+                    scrollable(
+                        column(self.log.iter().map(|(time, x)| {
+                            column![
+                                text(time.strftime("%H:%M:%S").to_string())
+                                    .size(12)
+                                    .font(self.monospace.weight(Weight::Medium))
+                                    .color(color!(0xFFFFFF, 0.65)),
+                                text(x)
+                            ]
+                            .boxed()
+                        }))
+                        .spacing(8)
+                        .padding(8)
+                    )
+                ]
+                .width(320)
                 .boxed(),
             );
         }
@@ -504,11 +609,22 @@ impl State {
                 server_rx.0.clone().into_stream().map(Message::Server)
             }),
             iced::keyboard::listen().filter_map(|event| match event {
-                iced::keyboard::Event::KeyPressed { key, modifiers, .. }
-                    if key == Key::Character("s".into())
-                        && modifiers == Modifiers::SHIFT | Modifiers::CTRL =>
-                {
-                    Some(Message::ToggleSidebar)
+                iced::keyboard::Event::KeyPressed { key, modifiers, .. } => {
+                    Some(match (key.as_ref(), modifiers) {
+                        (Key::Character("s"), modifiers)
+                            if modifiers == Modifiers::SHIFT | Modifiers::CTRL =>
+                        {
+                            Message::ToggleSidebar
+                        }
+                        (Key::Character("r"), Modifiers::NONE) => Message::RotateCurrent(false),
+                        (Key::Character("r"), Modifiers::SHIFT) => Message::RotateCurrent(true),
+                        (Key::Named(Named::ArrowLeft), Modifiers::NONE) => Message::SelectPrevious,
+                        (Key::Named(Named::ArrowRight), Modifiers::NONE) => Message::SelectNext,
+                        (Key::Named(Named::ArrowLeft), Modifiers::SHIFT) => Message::SwapPrevious,
+                        (Key::Named(Named::ArrowRight), Modifiers::SHIFT) => Message::SwapNext,
+                        (Key::Named(Named::Escape), Modifiers::NONE) => Message::Deselect,
+                        _ => return None,
+                    })
                 }
                 _ => None,
             }),
@@ -522,6 +638,13 @@ enum Message {
     Interface(InterfaceMessage),
     ThumbnailAllocated(IpAddr, Result<Allocation, iced::widget::image::Error>),
     ToggleSidebar,
+    SelectClient(usize),
+    SelectNext,
+    SelectPrevious,
+    SwapNext,
+    SwapPrevious,
+    RotateCurrent(bool),
+    Deselect,
 }
 
 impl From<InterfaceMessage> for Message {
@@ -532,18 +655,27 @@ impl From<InterfaceMessage> for Message {
 
 fn view_client<'a>(
     index: usize,
+    selected: bool,
     max: usize,
     address: IpAddr,
     client: &'a ClientState,
     theme: &Theme,
     font: &Font,
+    monospace: &'a Font,
 ) -> impl Widget<Message> + 'a {
+    fn floating_button(theme: &Theme, status: button::Status) -> button::Style {
+        button::Style {
+            border: rounded(4),
+            ..iced::widget::button::background(theme, status)
+        }
+    }
+
     let mut client_col = column![
         stack![
             container(if client.waiting {
                 column![
                     Icon::RotateCwFadingClock.widget().size(96),
-                    text("Waiting...").size(16)
+                    text("Waiting...").size(16),
                 ]
                 .align_x(Alignment::Center)
                 .boxed()
@@ -572,21 +704,119 @@ fn view_client<'a>(
                     .background(theme.palette().background.neutral.color)
                     .border(rounded(8))
             }),
-            if client.waiting {
-                space().boxed()
-            } else {
-                container(
-                    button(Icon::RotateCwSquare.widget())
-                        .style(|a, b| {
-                            let mut b = iced::widget::button::background(a, b);
-                            b.border.radius = 8.0.into();
-                            b
-                        })
-                        .on_press(InterfaceMessage::Rotate(address).into()),
-                )
-                .padding(8)
-                .boxed()
-            },
+            container(
+                column![
+                    row![
+                        (!client.waiting).then(|| keybind_tooltip(
+                            button(Icon::RotateCwSquare.widget().size(22))
+                                .style(floating_button)
+                                .padding(4)
+                                .on_press(InterfaceMessage::Rotate(address).into()),
+                            "Rotate",
+                            "R",
+                            Modifiers::NONE,
+                            monospace,
+                        )),
+                        space().width(Length::Fill),
+                        keybind_tooltip(
+                            button(Icon::ArrowLeft.widget().size(22))
+                                .style(floating_button)
+                                .padding(4)
+                                .on_press_maybe(
+                                    (index > 0)
+                                        .then(|| InterfaceMessage::Move(index, index - 1).into())
+                                ),
+                            "Move left",
+                            "←",
+                            Modifiers::SHIFT,
+                            monospace,
+                        ),
+                        keybind_tooltip(
+                            button(Icon::ArrowRight.widget().size(22))
+                                .style(floating_button)
+                                .padding(4)
+                                .on_press_maybe(
+                                    (index + 1 < max).then(|| InterfaceMessage::Move(
+                                        index,
+                                        index + 1
+                                    )
+                                    .into()),
+                                ),
+                            "Move right",
+                            "→",
+                            Modifiers::SHIFT,
+                            monospace
+                        )
+                    ]
+                    .spacing(8),
+                    space().height(Length::Fill),
+                    if client.waiting {
+                        row![
+                            button(
+                                row![Icon::CircleDashedCheck.widget(), "Accept"]
+                                    .align_y(Alignment::Center)
+                                    .spacing(4)
+                            )
+                            .style(iced::widget::button::success)
+                            .on_press(InterfaceMessage::AcceptClient(address).into()),
+                            button(
+                                row![Icon::Unplug.widget(), "Deny"]
+                                    .align_y(Alignment::Center)
+                                    .spacing(4)
+                            )
+                            .style(iced::widget::button::danger)
+                            .on_press(InterfaceMessage::DenyClient(address).into()),
+                        ]
+                    } else {
+                        row![
+                            space().width(Length::Fill),
+                            keybind_tooltip(
+                                button(Icon::ExternalLink.widget().size(22))
+                                    .style(|t, s| {
+                                        button::Style {
+                                            border: rounded(4),
+                                            shadow: Shadow {
+                                                color: color!(0, 0.5),
+                                                blur_radius: 8.0,
+                                                ..Default::default()
+                                            },
+                                            ..button::primary(t, s)
+                                        }
+                                    })
+                                    .padding(4)
+                                    .on_press(InterfaceMessage::OpenFolder(address).into()),
+                                "Open directory",
+                                "E",
+                                Modifiers::NONE,
+                                monospace,
+                            ),
+                            keybind_tooltip(
+                                button(Icon::Unplug.widget().size(22))
+                                    .style(|t, s| {
+                                        button::Style {
+                                            border: rounded(4),
+                                            shadow: Shadow {
+                                                color: color!(0, 0.5),
+                                                blur_radius: 8.0,
+                                                ..Default::default()
+                                            },
+                                            ..button::danger(t, s)
+                                        }
+                                    })
+                                    .padding(4)
+                                    .on_press(InterfaceMessage::DisconnectClient(address).into()),
+                                "Disconnect",
+                                "X",
+                                Modifiers::NONE,
+                                monospace,
+                            ),
+                        ]
+                    }
+                    .spacing(8)
+                ]
+                .align_x(Alignment::Center)
+            )
+            .padding(8)
         ]
         .boxed()
     ]
@@ -600,6 +830,8 @@ fn view_client<'a>(
                     span("Host: "),
                     span(&client.host).font(font.weight(Weight::Bold))
                 ]
+                .ellipsis(Ellipsis::End)
+                // .wrapping(text::Wrapping::None)
                 .size(16)
                 .on_link_click(never),
                 rich_text![
@@ -611,7 +843,6 @@ fn view_client<'a>(
                 ]
                 .size(14)
                 .on_link_click(never),
-                text(format!("{:#?}", client.progress)),
             ]
             .spacing(4),
         )
@@ -619,76 +850,53 @@ fn view_client<'a>(
         .boxed(),
     );
 
-    {
-        let left = button(Icon::ArrowLeft.widget().size(22))
-            .style(iced::widget::button::background)
-            .padding(5)
-            .on_press_maybe((index > 0).then(|| InterfaceMessage::Move(index, index - 1).into()));
-        let right = button(Icon::ArrowRight.widget().size(22))
-            .style(iced::widget::button::background)
-            .padding(5)
-            .on_press_maybe(
-                (index + 1 < max).then(|| InterfaceMessage::Move(index, index + 1).into()),
-            );
+    pub fn custom_style(selected: bool, theme: &Theme, status: button::Status) -> button::Style {
+        let palette = theme.palette();
 
-        let row = if client.waiting {
-            row![
-                button(
-                    row![Icon::CircleDashedCheck.widget(), "Accept"]
-                        .align_y(Alignment::Center)
-                        .spacing(4)
-                )
-                .style(iced::widget::button::success)
-                .on_press(InterfaceMessage::AcceptClient(address).into()),
-                button(
-                    row![Icon::Unplug.widget(), "Deny"]
-                        .align_y(Alignment::Center)
-                        .spacing(4)
-                )
-                .style(iced::widget::button::danger)
-                .on_press(InterfaceMessage::DenyClient(address).into()),
-                left,
-                right
-            ]
-        } else {
-            row![
-                button(
-                    row![Icon::ExternalLink.widget(), "Open folder"]
-                        .align_y(Alignment::Center)
-                        .spacing(4)
-                )
-                .on_press(InterfaceMessage::OpenFolder(address).into()),
-                button(
-                    row![Icon::Unplug.widget(), "Disconnect"]
-                        .align_y(Alignment::Center)
-                        .spacing(4)
-                )
-                .style(iced::widget::button::danger)
-                .on_press(InterfaceMessage::DisconnectClient(address).into()),
-                left,
-                right
-            ]
+        let base = button::Style {
+            background: Some(theme.palette().background.weakest.color.into()),
+            text_color: palette.background.base.text,
+            border: rounded(16)
+                .color(if selected {
+                    theme.palette().primary.base.color
+                } else {
+                    Default::default()
+                })
+                .width(2.0),
+            shadow: Shadow {
+                color: color!(0, 0.25),
+                blur_radius: 8.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        match status {
+            button::Status::Hovered => button::Style { ..base },
+            _ => base,
         }
-        .spacing(8);
-
-        client_col = client_col.push(row.boxed());
     }
 
-    container(client_col)
-        .style(|theme: &Theme| {
-            container::Style::default()
-                .background(theme.palette().background.weakest.color)
-                .border(
-                    rounded(16), // .color(theme.palette().background.neutral.color)
-                                 // .width(2.0),
-                )
-                .shadow(Shadow {
-                    color: color!(0, 0.25),
-                    blur_radius: 8.0,
-                    ..Default::default()
-                })
-        })
+    button(client_col)
+        .style(move |a, b| custom_style(selected, a, b))
         .padding(8)
+        .on_press(Message::SelectClient(index))
+}
+
+fn view_progress<'a>(progress: &'a FFmpegProgress, font: Font) -> impl Widget<Message> + 'a {
+    let bold = Font::with_family("Fira Code").weight(Weight::Bold);
+    row![
+        column!["Frame", "FPS", "Quality", "Bitrate", "Time", "Speed"].align_x(Alignment::End),
+        column![
+            text(progress.frame).font(bold),
+            text(progress.fps).font(bold),
+            text(progress.q).font(bold),
+            text(&progress.bitrate).font(bold),
+            text(format!("{:?}", progress.time)).font(bold),
+            text(progress.speed).font(bold),
+        ]
+    ]
+    .spacing(4)
 }
 
 trait IconToWidget {

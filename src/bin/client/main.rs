@@ -143,9 +143,8 @@ async fn client_thread(
     let mut heartbeat = tokio::time::interval(time * 10);
     heartbeat.tick().await;
 
-    // -vf "transpose=2,transpose=2"
     let mut command = Command::new("ffmpeg")
-        .args(["-hide_banner", "-v", "info"])
+        .args(["-hide_banner", "-v", "warning"])
         .args(["-re", "-hwaccel", "auto"])
         .args([
             "-f",
