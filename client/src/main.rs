@@ -145,7 +145,7 @@ async fn client_thread(
 
     let mut command = Command::new("ffmpeg")
         .args(["-hide_banner", "-v", "warning"])
-        .args(["-re", "-hwaccel", "auto"])
+        //.args(["-re", "-hwaccel", "auto"])
         .args([
             "-f",
             "v4l2",
@@ -157,7 +157,8 @@ async fn client_thread(
             "/dev/video0",
         ])
         .args(["-f", "pulse", "-i", "default"])
-        .args(["-f", "mpegts"])
+        //.args(["-f", "mpegts", "-q:v", "2"])
+        .args(["-c:v", "h264_v4l2m2m", "-pix_fmt", "yuv420p", "-b:v", "6000k", "-f", "mpegts"])
         .arg(format!("udp://{}:{}", address.ip(), udp_port))
         .stderr(Stdio::inherit())
         .stdout(Stdio::piped())

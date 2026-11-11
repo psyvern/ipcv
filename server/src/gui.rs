@@ -81,6 +81,7 @@ pub fn run(
         icon: iced::window::icon::from_file_data(include_bytes!("../../assets/logo.png"), None)
             .ok(),
         platform_specific: iced::window::settings::PlatformSpecific {
+            #[cfg(target="unix")]
             application_id: "hydra".to_owned(),
             ..Default::default()
         },

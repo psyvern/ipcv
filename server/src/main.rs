@@ -394,6 +394,7 @@ fn build_ffmpeg_command(port: u16, directory: &Path) -> send_ctrlc::Interruptibl
             "-i",
         ])
         .arg(format!("udp://0.0.0.0:{}", port))
+        .args(["-q:v", "2"])
         .arg(ts_file)
         .args(["-vf", "scale=-1:270,transpose=1,transpose=1"])
         .args([
