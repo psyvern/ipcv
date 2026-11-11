@@ -190,60 +190,60 @@ impl State {
         Self {
             log: Default::default(),
             selected_client: None,
-            clients: [
-                (
-                    IpAddr::V4(Ipv4Addr::new(255, 0, 1, 2)),
-                    ClientState {
-                        host: "ciaoooo".to_owned(),
-                        last_frame: None,
-                        waiting: true,
-                        progress: None,
-                        rotation: 0,
-                    },
-                ),
-                (
-                    IpAddr::V4(Ipv4Addr::new(25, 0, 1, 2)),
-                    ClientState {
-                        host: "ciaooodddo".to_owned(),
-                        last_frame: None,
-                        waiting: true,
-                        progress: None,
-                        rotation: 0,
-                    },
-                ),
-                (
-                    IpAddr::V4(Ipv4Addr::new(5, 0, 1, 2)),
-                    ClientState {
-                        host: "ciaooodsdso".to_owned(),
-                        last_frame: None,
-                        waiting: true,
-                        progress: None,
-                        rotation: 0,
-                    },
-                ),
-                (
-                    IpAddr::V4(Ipv4Addr::new(25, 2, 1, 2)),
-                    ClientState {
-                        host: "ciaooodddo".to_owned(),
-                        last_frame: None,
-                        waiting: true,
-                        progress: None,
-                        rotation: 0,
-                    },
-                ),
-                (
-                    IpAddr::V4(Ipv4Addr::new(5, 4, 1, 2)),
-                    ClientState {
-                        host: "ciaooodsdso".to_owned(),
-                        last_frame: None,
-                        waiting: true,
-                        progress: None,
-                        rotation: 0,
-                    },
-                ),
-            ]
-            .into(),
-            // clients: Default::default(),
+            // clients: [
+            //     (
+            //         IpAddr::V4(Ipv4Addr::new(255, 0, 1, 2)),
+            //         ClientState {
+            //             host: "ciaoooo".to_owned(),
+            //             last_frame: None,
+            //             waiting: true,
+            //             progress: None,
+            //             rotation: 0,
+            //         },
+            //     ),
+            //     (
+            //         IpAddr::V4(Ipv4Addr::new(25, 0, 1, 2)),
+            //         ClientState {
+            //             host: "ciaooodddo".to_owned(),
+            //             last_frame: None,
+            //             waiting: true,
+            //             progress: None,
+            //             rotation: 0,
+            //         },
+            //     ),
+            //     (
+            //         IpAddr::V4(Ipv4Addr::new(5, 0, 1, 2)),
+            //         ClientState {
+            //             host: "ciaooodsdso".to_owned(),
+            //             last_frame: None,
+            //             waiting: true,
+            //             progress: None,
+            //             rotation: 0,
+            //         },
+            //     ),
+            //     (
+            //         IpAddr::V4(Ipv4Addr::new(25, 2, 1, 2)),
+            //         ClientState {
+            //             host: "ciaooodddo".to_owned(),
+            //             last_frame: None,
+            //             waiting: true,
+            //             progress: None,
+            //             rotation: 0,
+            //         },
+            //     ),
+            //     (
+            //         IpAddr::V4(Ipv4Addr::new(5, 4, 1, 2)),
+            //         ClientState {
+            //             host: "ciaooodsdso".to_owned(),
+            //             last_frame: None,
+            //             waiting: true,
+            //             progress: None,
+            //             rotation: 0,
+            //         },
+            //     ),
+            // ]
+            // .into(),
+            clients: Default::default(),
             denied: IndexMap::default(),
             sidebar: false,
             gui_tx,
