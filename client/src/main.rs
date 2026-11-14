@@ -157,13 +157,36 @@ async fn client_thread(
             "/dev/video0",
         ])
         .args(["-f", "pulse", "-i", "default"])
-        //.args(["-f", "mpegts", "-q:v", "2"])
-        .args(["-c:v", "h264_v4l2m2m", "-pix_fmt", "yuv420p", "-b:v", "6000k", "-f", "mpegts"])
+        .args(["-f", "mpegts", "-q:v", "2"])
+        // .args(["-c:v", "h264_v4l2m2m", "-pix_fmt", "yuv420p", "-b:v", "6000k", "-f", "mpegts"])
         .arg(format!("udp://{}:{}", address.ip(), udp_port))
         .stderr(Stdio::inherit())
         .stdout(Stdio::piped())
         .spawn_interruptible()
         .unwrap();
+
+    let stderr = {
+        let stderr = command.stderr.take().unwrap();
+        tokio::spawn(async move {
+            let mut s = Box::pin(stderr_stream(stderr));
+
+            while let Some(x) = s.next().await {
+                match x {
+                    Ok(StderrMessage::Log(line)) => {
+                        let _ = output.send(ClientMessage::Log(line));
+                    }
+                    Ok(StderrMessage::Progress(progress)) => {
+                        let _ = output.send(ClientMessage::Progress(progress));
+                    }
+                    Err(e) => {
+                        if e.kind() != std::io::ErrorKind::UnexpectedEof {
+                            println!("{e:#?}");
+                        }
+                    }
+                }
+            }
+        })
+    };
 
     let result = loop {
         select! {

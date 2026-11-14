@@ -1,8 +1,11 @@
 pub mod messages;
+pub mod threads;
 
 use std::{
+    fmt::Display,
     io::Stdin,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    str::FromStr,
 };
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -110,5 +113,56 @@ where
 
     fn send(&mut self, message: I) -> Self::Output<'_> {
         SinkExt::send(&mut self.inner, (self.map)(message))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LogLevel {
+    Info,
+    Warning,
+    Error,
+}
+
+#[derive(Debug, Clone)]
+pub struct LogLine {
+    pub level: LogLevel,
+    pub parts: Vec<String>,
+    pub line: String,
+}
+
+impl Display for LogLine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "[\x1b[{};1m{}\x1b[0m] {}{}",
+            match self.level {
+                LogLevel::Info => "92",
+                LogLevel::Warning => "93",
+                LogLevel::Error => "91",
+            },
+            match self.level {
+                LogLevel::Info => " info",
+                LogLevel::Warning => " warn",
+                LogLevel::Error => "error",
+            },
+            self.parts
+                .iter()
+                .map(|x| format!("[{x}] "))
+                .collect::<String>(),
+            self.line
+        )
+    }
+}
+
+impl FromStr for LogLevel {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "info" => Self::Info,
+            "warning" => Self::Warning,
+            "error" => Self::Error,
+            _ => return Err(s.to_owned()),
+        })
     }
 }

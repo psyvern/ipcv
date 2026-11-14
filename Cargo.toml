@@ -3,6 +3,7 @@ resolver = "3"
 members = ["client", "library", "server"]
 
 [workspace.dependencies]
+async-stream = "0.3.6"
 bytes = "1.12.1"
 clap = { version = "4.6.6", features = ["derive"] }
 colored = "3.1.1"
@@ -20,9 +21,9 @@ jiff = "0.2.39"
 lucide-icons = "1.45.0"
 nokhwa = { version = "0.10.11", features = ["input-native", "output-threaded"] }
 open = "5.4.4"
-send_ctrlc = "0.6.0"
+send_ctrlc = { version = "0.6.0", features = ["tokio"] }
 termios = "0.3.3"
-tokio = { version = "1.53.1", features = ["full"] }
+tokio = { version = "1.53.1", features = ["full", "process"] }
 tokio-util = { version = "0.7.19", features = ["codec", "net"] }
 
 [patch.crates-io]

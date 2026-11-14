@@ -5,6 +5,8 @@ use itertools::Itertools;
 use nokhwa::utils::{CameraFormat, FrameFormat};
 use tokio_util::codec::{Decoder, Encoder};
 
+use crate::{LogLine, threads::FFmpegProgress};
+
 pub trait Encode: Sized {
     fn encode(self, src: &mut bytes::BytesMut);
 
@@ -141,12 +143,20 @@ impl Decode for ServerMessage {
 
 /// A message sent from the client to the server
 pub enum ClientMessage {
+    Log(LogLine),
+    Progress(FFmpegProgress),
     Close,
 }
 
 impl Encode for ClientMessage {
     fn encode(self, dst: &mut bytes::BytesMut) {
         match self {
+            Self::Log(message) => {
+                todo!();
+            }
+            Self::Progress(message) => {
+                todo!();
+            }
             Self::Close => dst.put_u8(1),
         }
     }

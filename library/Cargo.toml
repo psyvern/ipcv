@@ -4,11 +4,14 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+async-stream.workspace = true
 bytes.workspace = true
 crossterm.workspace = true
+flume.workspace = true
 futures.workspace = true
 itertools.workspace = true
 nokhwa.workspace = true
+tokio.workspace = true
 tokio-util.workspace = true
 
 [target."cfg(unix)".dependencies]

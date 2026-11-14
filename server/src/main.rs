@@ -10,7 +10,6 @@ use futures::StreamExt;
 use futures::channel::mpsc::UnboundedReceiver;
 use indexmap::IndexMap;
 use jiff::Timestamp;
-use library::CustomSender;
 use library::MapSender;
 use library::TermMode;
 use library::is_closing_key;
@@ -20,55 +19,25 @@ use library::messages::CustomCodec;
 use library::messages::Decode;
 use library::messages::Encode;
 use library::messages::ServerMessage;
+use library::threads::{FFmpegProgress, StderrMessage, stderr_stream, stdout_stream};
+use library::{CustomSender, LogLine};
 use nokhwa::utils::CameraFormat;
-use send_ctrlc::{Interruptible, InterruptibleChild, InterruptibleCommand};
-use std::collections::HashMap;
-use std::fmt::Display;
-use std::io::{BufRead, BufReader, Read};
+use send_ctrlc::tokio::InterruptibleChild;
+use send_ctrlc::{Interruptible, InterruptibleCommand};
 use std::net::Ipv4Addr;
 use std::net::SocketAddr;
 use std::path::Path;
-use std::process::{ChildStderr, ChildStdout, Command, Stdio};
-use std::str::FromStr;
+use std::process::Stdio;
 use std::sync::Arc;
-use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use std::{fs::File, net::IpAddr, path::PathBuf};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::process::Command;
 use tokio::runtime::Runtime;
-use tokio::task::JoinSet;
+use tokio::task::{JoinHandle, JoinSet};
 use tokio::{net::UdpSocket, select};
 use tokio_util::codec::FramedRead;
 use tokio_util::udp::UdpFramed;
-
-#[derive(Clone, Debug)]
-struct FFmpegProgress {
-    frame: usize,
-    fps: f64,
-    q: f64,
-    bitrate: String,
-    total_size: usize,
-    time: Duration,
-    dup_frames: usize,
-    drop_frames: usize,
-    speed: f64,
-}
-
-impl FFmpegProgress {
-    fn from_values(mut values: HashMap<String, String>) -> Option<Self> {
-        Some(Self {
-            frame: values.remove("frame")?.parse().ok()?,
-            fps: values.remove("fps")?.parse().ok()?,
-            q: values.remove("stream_0_0_q")?.parse().ok()?,
-            bitrate: values.remove("bitrate")?.parse().ok()?,
-            total_size: values.remove("total_size")?.parse().ok()?,
-            time: Duration::from_micros(values.remove("out_time_us")?.parse().ok()?),
-            dup_frames: values.remove("dup_frames")?.parse().ok()?,
-            drop_frames: values.remove("drop_frames")?.parse().ok()?,
-            speed: values.remove("speed")?.trim_end_matches('x').parse().ok()?,
-        })
-    }
-}
 
 #[derive(Debug, Clone, Parser)]
 pub struct Args {
@@ -152,175 +121,6 @@ struct ClientData {
     directory: PathBuf,
 }
 
-#[derive(Debug, Clone, Copy)]
-enum LogLevel {
-    Info,
-    Warning,
-    Error,
-}
-
-#[derive(Debug, Clone)]
-struct LogLine {
-    level: LogLevel,
-    parts: Vec<String>,
-    line: String,
-}
-
-impl Display for LogLine {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "[\x1b[{};1m{}\x1b[0m] {}{}",
-            match self.level {
-                LogLevel::Info => "92",
-                LogLevel::Warning => "93",
-                LogLevel::Error => "91",
-            },
-            match self.level {
-                LogLevel::Info => " info",
-                LogLevel::Warning => " warn",
-                LogLevel::Error => "error",
-            },
-            self.parts
-                .iter()
-                .map(|x| format!("[{x}] "))
-                .collect::<String>(),
-            self.line
-        )
-    }
-}
-
-impl FromStr for LogLevel {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(match s {
-            "info" => Self::Info,
-            "warning" => Self::Warning,
-            "error" => Self::Error,
-            _ => return Err(s.to_owned()),
-        })
-    }
-}
-
-fn stderr_thread(
-    address: IpAddr,
-    stderr: ChildStderr,
-    output: &flume::Sender<ServerEvent>,
-) -> std::io::Result<()> {
-    // let mut stderr = tokio::io::BufReader::new(stderr);
-    let mut stderr = BufReader::new(stderr);
-    let mut line = String::new();
-    let mut map = HashMap::new();
-
-    let mut last_line = None::<LogLine>;
-
-    loop {
-        line.clear();
-
-        if stderr.read_line(&mut line)? == 0 {
-            break;
-        }
-
-        let line = line.trim_end_matches('\n');
-
-        if let Some((key, value)) = line.split_once('=')
-            && key
-                .chars()
-                .all(|x| matches!(x, '0'..='9' | '_' | 'a'..='z'))
-        {
-            map.insert(key.to_owned(), value.trim().to_owned());
-
-            if key == "progress" {
-                let progress = FFmpegProgress::from_values(map);
-                map = HashMap::new();
-
-                if let Some(progress) = progress {
-                    output.send(ServerEvent::ProgressReceived { address, progress });
-                }
-            }
-        } else {
-            let mut parts = Vec::new();
-            let mut line = line;
-            while let Some(new) = line.strip_prefix('[') {
-                if let Some((part, new)) = new.split_once("] ") {
-                    parts.push(part);
-                    line = new;
-                } else {
-                    break;
-                }
-            }
-            let level: Option<LogLevel> = parts.pop().and_then(|x| x.parse().ok());
-            match level {
-                Some(level) => {
-                    if let Some(line) = last_line {
-                        output.send(ServerEvent::LogReceived { address, log: line });
-                    }
-
-                    last_line = Some(LogLine {
-                        level,
-                        parts: parts.into_iter().map(str::to_owned).collect(),
-                        line: line.to_owned(),
-                    });
-                }
-                None => {
-                    if let Some(last_line) = &mut last_line {
-                        last_line.line.push('\n');
-                        last_line.line.push_str(line);
-                    }
-                }
-            }
-        }
-    }
-
-    if let Some(line) = last_line {
-        output.send(ServerEvent::LogReceived { address, log: line });
-    }
-
-    Ok(())
-}
-
-fn stdout_thread(
-    address: IpAddr,
-    stdout: ChildStdout,
-    output: &flume::Sender<ServerEvent>,
-) -> std::io::Result<()> {
-    let mut stdout = BufReader::new(stdout);
-
-    let mut header = [0u8; 6];
-    loop {
-        stdout.read_exact(&mut header)?;
-
-        if !(header[0] == b'B' && header[1] == b'M') {
-            eprintln!("unexpected header: {header:?}");
-            break;
-        }
-
-        let size = u32::from_le_bytes([header[2], header[3], header[4], header[5]]) as usize;
-
-        let mut buf = vec![0; size];
-        stdout.read_exact(&mut buf[6..])?;
-
-        let offset = u32::from_le_bytes([buf[10], buf[11], buf[12], buf[13]]) as usize;
-
-        let width = u32::from_le_bytes([buf[18], buf[19], buf[20], buf[21]]);
-        let height = u32::from_le_bytes([buf[22], buf[23], buf[24], buf[25]]);
-        let data = buf.split_off(offset);
-        let data = library::bgra_to_rgba(data);
-
-        output
-            .send(ServerEvent::FrameReceived {
-                address,
-                width,
-                height,
-                data,
-            })
-            .unwrap();
-    }
-
-    Ok(())
-}
-
 enum InfraThreadMessage {
     Close,
 }
@@ -338,12 +138,27 @@ impl FFmpegThread {
         let stdout = {
             let output = output.clone();
             let stdout = command.stdout.take().unwrap();
-            std::thread::spawn(move || {
-                let result = stdout_thread(address.ip(), stdout, &output);
-                if let Err(e) = result
-                    && e.kind() != std::io::ErrorKind::UnexpectedEof
-                {
-                    println!("{e:#?}");
+            tokio::spawn(async move {
+                let mut s = Box::pin(stdout_stream(stdout));
+
+                while let Some(x) = s.next().await {
+                    match x {
+                        Ok((width, height, data)) => {
+                            let _ = output.send(ServerEvent::Client(
+                                address.ip(),
+                                ServerClientEvent::Frame {
+                                    width,
+                                    height,
+                                    data,
+                                },
+                            ));
+                        }
+                        Err(e) => {
+                            if e.kind() != std::io::ErrorKind::UnexpectedEof {
+                                println!("{e:#?}");
+                            }
+                        }
+                    }
                 }
 
                 output
@@ -351,12 +166,29 @@ impl FFmpegThread {
         };
         let stderr = {
             let stderr = command.stderr.take().unwrap();
-            std::thread::spawn(move || {
-                let result = stderr_thread(address.ip(), stderr, &output);
-                if let Err(e) = result
-                    && e.kind() != std::io::ErrorKind::UnexpectedEof
-                {
-                    println!("{e:#?}");
+            tokio::spawn(async move {
+                let mut s = Box::pin(stderr_stream(stderr));
+
+                while let Some(x) = s.next().await {
+                    match x {
+                        Ok(StderrMessage::Log(line)) => {
+                            let _ = output.send(ServerEvent::Client(
+                                address.ip(),
+                                ServerClientEvent::Log(line),
+                            ));
+                        }
+                        Ok(StderrMessage::Progress(progress)) => {
+                            let _ = output.send(ServerEvent::Client(
+                                address.ip(),
+                                ServerClientEvent::Progress(progress),
+                            ));
+                        }
+                        Err(e) => {
+                            if e.kind() != std::io::ErrorKind::UnexpectedEof {
+                                println!("{e:#?}");
+                            }
+                        }
+                    }
                 }
             })
         };
@@ -368,18 +200,18 @@ impl FFmpegThread {
         }
     }
 
-    fn close(self) -> flume::Sender<ServerEvent> {
-        command_terminate_then_kill(self.command);
-        self.stderr.join().unwrap();
-        self.stdout.join().unwrap()
+    async fn close(self) -> flume::Sender<ServerEvent> {
+        command_terminate_then_kill(self.command).await;
+        self.stderr.await.unwrap();
+        self.stdout.await.unwrap()
     }
 }
 
-fn build_ffmpeg_command(port: u16, directory: &Path) -> send_ctrlc::InterruptibleChild {
+fn build_ffmpeg_command(port: u16, directory: &Path) -> InterruptibleChild {
     let ts_file = directory.join("output.ts");
 
     Command::new("ffmpeg")
-        .args(["-hide_banner", "-v", "level+warning"])
+        .args(["-hide_banner", "-v", "level+info"])
         .args(["-nostats", "-stats_period", "1", "-progress", "pipe:2"])
         .args([
             // "-probesize",
@@ -414,19 +246,19 @@ fn build_ffmpeg_command(port: u16, directory: &Path) -> send_ctrlc::Interruptibl
         .unwrap()
 }
 
-fn command_terminate_then_kill(mut command: InterruptibleChild) {
-    command.terminate();
+async fn command_terminate_then_kill(mut command: InterruptibleChild) -> std::io::Result<()> {
+    command.terminate()?;
 
     // TODO: temporary fix for block
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(2) {
         match command.try_wait() {
-            Err(_) | Ok(Some(_)) => return,
+            Err(_) | Ok(Some(_)) => return Ok(()),
             _ => {}
         }
     }
 
-    command.kill();
+    command.kill().await
 }
 
 async fn connection_thread(
@@ -451,7 +283,7 @@ async fn connection_thread(
     let ffmpeg = FFmpegThread::new(
         (client.address.ip(), client.udp_port).into(),
         &client.directory,
-        output,
+        output.clone(),
     );
 
     loop {
@@ -472,13 +304,19 @@ async fn connection_thread(
             }
             Some(Ok(amount)) = reader.next() => {
                 match amount {
+                    ClientMessage::Log(message) => {
+                        output.send(ServerEvent::Client(client.address.ip(), ServerClientEvent::Log(message)));
+                    }
+                    ClientMessage::Progress(message) => {
+                        output.send(ServerEvent::Client(client.address.ip(), ServerClientEvent::Progress(message)));
+                    }
                     ClientMessage::Close => break,
                 }
             }
         }
     }
 
-    ffmpeg.close();
+    ffmpeg.close().await;
     Ok(())
 }
 
@@ -511,7 +349,7 @@ async fn loop_iteration(
 
                             client.status = ClientStatus::Waiting;
 
-                            let _ = output.send(ServerEvent::ClientDisconnected { address });
+                            let _ = output.send(ServerEvent::Client(address, ServerClientEvent::Disconnected));
                         }
                 }
                 InterfaceMessage::AllowClient(address) => {
@@ -524,7 +362,7 @@ async fn loop_iteration(
                         let msg = ServerMessage::Close { force: true };
                         let _ = data_socket_2.send((msg, (address, client.port).into())).await;
                         recently_denied.insert(address, client.port);
-                        let _ = output.send(ServerEvent::ClientDenied { address });
+                        let _ = output.send(ServerEvent::Client(address, ServerClientEvent::Denied));
                     }
                 }
                 InterfaceMessage::AcceptClient(address) => {
@@ -565,7 +403,7 @@ async fn loop_iteration(
                                 Err(_) => {
                                     eprintln!("Client {address} did not connect, removing it");
                                     clients.shift_remove(&address);
-                                    let _ = output.send(ServerEvent::ClientDenied { address });
+                                    let _ = output.send(ServerEvent::Client(address, ServerClientEvent::Denied));
                                     return None;
                                 }
                             };
@@ -595,7 +433,7 @@ async fn loop_iteration(
 
                         }
 
-                        let _ = output.send(ServerEvent::ClientAccepted { address });
+                        let _ = output.send(ServerEvent::Client(address, ServerClientEvent::Accepted));
 
                         client.status = ClientStatus::Connected {
                             sender: infra_thread_tx,
@@ -626,10 +464,7 @@ async fn loop_iteration(
                     let _ = data_socket_2.send((msg, (address, port).into())).await;
                     return None;
                 }
-                let _ = output.send(ServerEvent::ClientConnected {
-                    address,
-                    host: host.to_owned(),
-                });
+                let _ = output.send(ServerEvent::Client(address, ServerClientEvent::Connected { host: host.to_owned() }));
 
                 println!(
                     "Added address {} as host {}",
@@ -652,7 +487,7 @@ async fn loop_iteration(
                     println!(
                         "Removed address {} from clients", address.to_string().bright_green().bold(),
                     );
-                    let _ = output.send(ServerEvent::ClientDenied { address });
+                    let _ = output.send(ServerEvent::Client(address, ServerClientEvent::Denied));
                 }
         }
         else => return None,
@@ -791,35 +626,28 @@ fn main() -> iced::Result {
 }
 
 #[derive(Debug, Clone)]
-pub enum ServerEvent {
-    Stopped,
-    ClientConnected {
-        address: IpAddr,
+pub enum ServerClientEvent {
+    Connected {
         host: String,
     },
-    ClientAccepted {
-        address: IpAddr,
-    },
-    ClientDisconnected {
-        address: IpAddr,
-    },
-    ClientDenied {
-        address: IpAddr,
-    },
-    FrameReceived {
-        address: IpAddr,
+    Accepted,
+    Disconnected,
+    Denied,
+    Frame {
         width: u32,
         height: u32,
         data: Vec<u8>,
     },
-    ProgressReceived {
-        address: IpAddr,
-        progress: FFmpegProgress,
-    },
-    LogReceived {
-        address: IpAddr,
-        log: LogLine,
-    },
+    Progress(FFmpegProgress),
+    Log(LogLine),
+}
+
+#[derive(Debug, Clone)]
+pub enum ServerEvent {
+    /// The server was stopped
+    Stopped,
+    /// A message specific to a client
+    Client(IpAddr, ServerClientEvent),
 }
 
 #[derive(Debug, Clone)]
