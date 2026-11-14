@@ -3,11 +3,11 @@ resolver = "3"
 members = ["client", "library", "server"]
 
 [workspace.dependencies]
+async-stream = "0.3.6"
 bytes = "1.12.1"
 clap = { version = "4.6.6", features = ["derive"] }
 colored = "3.1.1"
 crossterm = { version = "0.29.0", features = ["event-stream"] }
-flume = "0.12.0"
 fontconfig = "0.11.0"
 futures = "0.3.34"
 hostname = "0.4.2"
@@ -16,14 +16,17 @@ iced = { version = "0.15.0-dev", features = ["image", "svg", "tokio"] }
 image = "0.25.10"
 indexmap = "2.14.2"
 itertools = "0.15.0"
-jiff = "0.2.39"
+jiff = "1.0.1"
 lucide-icons = "1.45.0"
 nokhwa = { version = "0.10.11", features = ["input-native", "output-threaded"] }
 open = "5.4.4"
-send_ctrlc = "0.6.0"
+send_ctrlc = { version = "0.6.0", features = ["tokio"] }
+strum = { version = "0.28.0", features = ["derive"] }
 termios = "0.3.3"
-tokio = { version = "1.53.1", features = ["full"] }
+tokio = { version = "1.53.1", features = ["full", "process"] }
+tokio-stream = { version = "0.1.19", features = ["sync"] }
 tokio-util = { version = "0.7.19", features = ["codec", "net"] }
+wincode = { version = "0.6.3", features = ["derive"] }
 
 [patch.crates-io]
 iced.git = "https://github.com/iced-rs/iced.git"

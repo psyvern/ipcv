@@ -1,13 +1,17 @@
 pub mod messages;
-
-use std::{
-    io::Stdin,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr},
-};
+pub mod threads;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use futures::{Sink, SinkExt};
 use itertools::Itertools;
+use std::{
+    fmt::Display,
+    io::Stdin,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    str::FromStr,
+};
+use strum::EnumIter;
+use wincode::{SchemaRead, SchemaWrite};
 
 pub fn is_closing_key(event: KeyEvent) -> bool {
     matches!(
@@ -110,5 +114,59 @@ where
 
     fn send(&mut self, message: I) -> Self::Output<'_> {
         SinkExt::send(&mut self.inner, (self.map)(message))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, SchemaRead, SchemaWrite, EnumIter)]
+pub enum LogLevel {
+    Trace,
+    Info,
+    Warning,
+    Error,
+}
+
+#[derive(Debug, Clone, SchemaRead, SchemaWrite)]
+pub struct LogLine {
+    pub level: LogLevel,
+    pub parts: Vec<(String, u64)>,
+    pub message: String,
+}
+
+impl Display for LogLine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "[\x1b[{};1m{}\x1b[0m] {}{}",
+            match self.level {
+                LogLevel::Trace => "96",
+                LogLevel::Info => "92",
+                LogLevel::Warning => "93",
+                LogLevel::Error => "91",
+            },
+            match self.level {
+                LogLevel::Trace => "trace",
+                LogLevel::Info => " info",
+                LogLevel::Warning => " warn",
+                LogLevel::Error => "error",
+            },
+            self.parts
+                .iter()
+                .map(|(a, b)| format!("[{a} @ 0x{b:X}] "))
+                .collect::<String>(),
+            self.message
+        )
+    }
+}
+
+impl FromStr for LogLevel {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "info" => Self::Info,
+            "warning" => Self::Warning,
+            "error" => Self::Error,
+            _ => return Err(s.to_owned()),
+        })
     }
 }

@@ -14,3 +14,4 @@ nokhwa.workspace = true
 send_ctrlc.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+wincode.workspace = true

@@ -1,66 +1,140 @@
-use std::{marker::PhantomData, time::Duration};
+use std::{fmt::Display, io::Read, marker::PhantomData, time::Duration};
 
 use bytes::{Buf, BufMut, BytesMut};
-use itertools::Itertools;
-use nokhwa::utils::{CameraFormat, FrameFormat};
 use tokio_util::codec::{Decoder, Encoder};
+use wincode::{SchemaRead, SchemaWrite, config::DefaultConfig, io::std_read::ReadAdapter};
 
-pub trait Encode: Sized {
-    fn encode(self, src: &mut bytes::BytesMut);
+use crate::{LogLine, threads::FFmpegProgress};
 
-    fn encoder() -> CustomCodec<Self, ()> {
-        CustomCodec(PhantomData)
-    }
+pub struct BinCodec<R, W>(PhantomData<(R, W)>);
 
-    fn into_bytes(self) -> Vec<u8> {
-        let mut dst = BytesMut::new();
-        self.encode(&mut dst);
-        dst.to_vec()
-    }
-}
-
-pub trait Decode: Sized {
-    fn decode(src: &mut bytes::BytesMut) -> Option<Self>;
-
-    fn decoder() -> CustomCodec<(), Self> {
-        CustomCodec(PhantomData)
-    }
-
-    fn from_bytes(data: &[u8]) -> Option<Self> {
-        let mut src = BytesMut::from(data);
-        Self::decode(&mut src)
-    }
-}
-
-pub struct CustomCodec<E, D>(PhantomData<(E, D)>);
-
-impl<E: Encode, D: Decode> CustomCodec<E, D> {
+impl<R, W> BinCodec<R, W> {
+    /// Provides a bincode based codec
     pub fn new() -> Self {
         Self(PhantomData)
     }
 }
 
-impl<E: Encode, D> Encoder<E> for CustomCodec<E, D> {
-    type Error = std::io::Error;
+impl<R, W> Default for BinCodec<R, W> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
-    fn encode(&mut self, item: E, dst: &mut bytes::BytesMut) -> Result<(), Self::Error> {
-        item.encode(dst);
+impl<R> BinCodec<R, ()> {
+    pub fn decoder() -> Self {
+        Self::default()
+    }
+}
+
+impl<W> BinCodec<(), W> {
+    pub fn encoder() -> Self {
+        Self::default()
+    }
+}
+
+#[derive(Debug)]
+pub struct ReadError(pub wincode::ReadError);
+
+impl Display for ReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl From<wincode::ReadError> for ReadError {
+    fn from(value: wincode::ReadError) -> Self {
+        Self(value)
+    }
+}
+
+impl From<std::io::Error> for ReadError {
+    fn from(value: std::io::Error) -> Self {
+        Self(wincode::ReadError::Io(value.into()))
+    }
+}
+
+impl<R, W> Decoder for BinCodec<R, W>
+where
+    R: for<'de> wincode::SchemaRead<'de, DefaultConfig, Dst = R>,
+{
+    type Item = R;
+    type Error = ReadError;
+
+    fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        if !buf.is_empty() {
+            let mut reader = Reader::new(&buf[..]);
+            let message = wincode::deserialize_from(ReadAdapter::new(&mut reader))?;
+            buf.advance(reader.amount());
+            Ok(Some(message))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct WriteError(pub wincode::WriteError);
+
+impl Display for WriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl From<wincode::WriteError> for WriteError {
+    fn from(value: wincode::WriteError) -> Self {
+        Self(value)
+    }
+}
+
+impl From<std::io::Error> for WriteError {
+    fn from(value: std::io::Error) -> Self {
+        Self(wincode::WriteError::Io(value.into()))
+    }
+}
+
+impl<R, W> Encoder<W> for BinCodec<R, W>
+where
+    W: SchemaWrite<DefaultConfig, Src = W>,
+{
+    type Error = WriteError;
+
+    fn encode(&mut self, item: W, buf: &mut BytesMut) -> Result<(), Self::Error> {
+        let size = wincode::serialized_size(&item)?;
+        buf.reserve(size as usize);
+        let message = wincode::serialize(&item)?;
+        buf.put(&message[..]);
         Ok(())
     }
 }
 
-impl<E, D: Decode> Decoder for CustomCodec<E, D> {
-    type Error = std::io::Error;
+#[derive(Debug)]
+struct Reader<'buf> {
+    buf: &'buf [u8],
+    amount: usize,
+}
 
-    type Item = D;
+impl<'buf> Reader<'buf> {
+    pub fn new(buf: &'buf [u8]) -> Self {
+        Reader { buf, amount: 0 }
+    }
 
-    fn decode(&mut self, src: &mut bytes::BytesMut) -> Result<Option<Self::Item>, Self::Error> {
-        Ok(D::decode(src))
+    pub fn amount(&self) -> usize {
+        self.amount
+    }
+}
+
+impl<'buf, 'a> Read for &'a mut Reader<'buf> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let bytes_read = self.buf.read(buf)?;
+        self.amount += bytes_read;
+        Ok(bytes_read)
     }
 }
 
 /// A message sent from the server to the client
-#[derive(Debug)]
+#[derive(Debug, SchemaRead, SchemaWrite)]
 pub enum ServerMessage {
     /// Open the TCP connection
     Open {
@@ -83,140 +157,17 @@ pub enum ServerMessage {
     Allow,
 }
 
-impl Encode for ServerMessage {
-    fn encode(self, dst: &mut bytes::BytesMut) {
-        match self {
-            Self::Open {
-                tcp_port,
-                udp_port,
-                interval,
-            } => {
-                dst.put_u8(0);
-                dst.extend(tcp_port.to_be_bytes());
-                dst.extend(udp_port.to_be_bytes());
-                dst.extend(interval.as_secs_f64().to_be_bytes());
-            }
-            Self::Close { force } => dst.extend([1, force as u8]),
-            Self::Heartbeat => dst.put_u8(2),
-            Self::UpdateInterval(interval) => {
-                dst.put_u8(3);
-                dst.extend(interval.as_secs_f64().to_be_bytes());
-            }
-            Self::Allow => {
-                dst.put_u8(4);
-            }
-        }
-    }
-}
-
-impl Decode for ServerMessage {
-    fn decode(src: &mut bytes::BytesMut) -> Option<Self> {
-        let src = &mut src.split();
-        Some(match src.try_get_u8().ok()? {
-            0 => {
-                let tcp_port = src.try_get_u16().ok()?;
-                let udp_port = src.try_get_u16().ok()?;
-                let interval = Duration::try_from_secs_f64(src.try_get_f64().ok()?).ok()?;
-
-                Self::Open {
-                    tcp_port,
-                    udp_port,
-                    interval,
-                }
-            }
-            1 => {
-                let force = src.try_get_u8().ok()? != 0;
-                Self::Close { force }
-            }
-            2 => Self::Heartbeat,
-            3 => {
-                let interval = Duration::try_from_secs_f64(src.try_get_f64().ok()?).ok()?;
-                Self::UpdateInterval(interval)
-            }
-            4 => Self::Allow,
-            _ => return None,
-        })
-    }
-}
-
 /// A message sent from the client to the server
+#[derive(Debug, SchemaRead, SchemaWrite)]
 pub enum ClientMessage {
+    Log(LogLine),
+    Progress(FFmpegProgress),
     Close,
 }
 
-impl Encode for ClientMessage {
-    fn encode(self, dst: &mut bytes::BytesMut) {
-        match self {
-            Self::Close => dst.put_u8(1),
-        }
-    }
-}
-
-impl Decode for ClientMessage {
-    fn decode(src: &mut bytes::BytesMut) -> Option<Self> {
-        let result = match src.first()? {
-            1 => {
-                src.advance(1);
-                Self::Close
-            }
-            x => panic!("Received unknown message type: {x}"),
-        };
-
-        Some(result)
-    }
-}
-
 /// The message a client while waiting for a connection
+#[derive(SchemaRead, SchemaWrite)]
 pub struct ClientInitialMessage {
     pub port: u16,
-    pub format: CameraFormat,
-    pub host: String,
-}
-
-impl Encode for ClientInitialMessage {
-    fn encode(self, dst: &mut bytes::BytesMut) {
-        dst.extend(b"open ");
-        dst.put_u16(self.port);
-        dst.put_u32(self.format.width());
-        dst.put_u32(self.format.height());
-        dst.put_u32(self.format.frame_rate());
-        dst.put_u8(match self.format.format() {
-            FrameFormat::MJPEG => 0,
-            FrameFormat::YUYV => 1,
-            FrameFormat::NV12 => 2,
-            FrameFormat::GRAY => 3,
-            FrameFormat::RAWRGB => 4,
-            FrameFormat::RAWBGR => 5,
-        });
-        dst.extend(self.host.bytes());
-    }
-}
-
-impl Decode for ClientInitialMessage {
-    fn decode(src: &mut bytes::BytesMut) -> Option<Self> {
-        let src = &mut src.split();
-        let data = src.strip_prefix(b"open ")?;
-
-        let mut data = data.iter().copied();
-        let port = u16::from_be_bytes(data.next_array()?);
-        let width = u32::from_be_bytes(data.next_array()?);
-        let height = u32::from_be_bytes(data.next_array()?);
-        let frame_rate = u32::from_be_bytes(data.next_array()?);
-        let format = match data.next()? {
-            0 => FrameFormat::MJPEG,
-            1 => FrameFormat::YUYV,
-            2 => FrameFormat::NV12,
-            3 => FrameFormat::GRAY,
-            4 => FrameFormat::RAWRGB,
-            5 => FrameFormat::RAWBGR,
-            _ => return None,
-        };
-        let host = String::from_utf8(data.collect()).ok()?;
-
-        Some(Self {
-            port,
-            format: CameraFormat::new_from(width, height, format, frame_rate),
-            host,
-        })
-    }
+    pub name: String,
 }

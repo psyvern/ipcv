@@ -8,7 +8,6 @@ bytes.workspace = true
 clap.workspace = true
 colored.workspace = true
 crossterm.workspace = true
-flume.workspace = true
 futures.workspace = true
 humantime.workspace = true
 iced.workspace = true
@@ -18,10 +17,11 @@ itertools.workspace = true
 jiff.workspace = true
 library.path = "../library"
 lucide-icons.workspace = true
-nokhwa.workspace = true
 open.workspace = true
 send_ctrlc.workspace = true
+strum.workspace = true
 tokio.workspace = true
+tokio-stream.workspace = true
 tokio-util.workspace = true
 
 [target."cfg(unix)".dependencies]
