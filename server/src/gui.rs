@@ -213,6 +213,10 @@ impl State {
         self.panes.maximized().is_none()
     }
 
+    fn send(&self, message: InterfaceMessage) {
+        let _ = self.gui_tx.unbounded_send(message);
+    }
+
     fn new(
         gui_tx: UnboundedSender<InterfaceMessage>,
         font: Option<String>,
@@ -407,7 +411,7 @@ impl State {
                     _ => (),
                 }
 
-                let _ = self.gui_tx.unbounded_send(cmd);
+                self.send(cmd);
             }
             Message::ThumbnailAllocated(address, allocation) => {
                 if let Some(client) = self.clients.get_mut(&address) {
@@ -515,8 +519,7 @@ impl State {
             }
             Message::OpenFolderCurrent => {
                 if let Some(selected) = self.selected_client {
-                    self.gui_tx
-                        .unbounded_send(InterfaceMessage::OpenFolder(Some(selected)));
+                    self.send(InterfaceMessage::OpenFolder(Some(selected)));
                 }
             }
             Message::Deselect => self.selected_client = None,
@@ -719,24 +722,25 @@ impl State {
     }
 
     fn view_sidebar(&self) -> impl Widget<Message> + '_ {
-        let mut logs = self
-            .log
-            .iter()
-            .enumerate()
-            .filter(|(_, LogEntry { address, .. })| {
-                self.selected_client.is_none_or(|y| address == &Some(y))
-            })
-            .filter(|(_, LogEntry { level, .. })| *level >= self.log_level)
-            .map(|(index, entry)| view_log(&self.style, index, entry).boxed())
-            .intersperse_with(|| {
+        let mut logs = Itertools::intersperse_with(
+            self.log
+                .iter()
+                .enumerate()
+                .filter(|(_, LogEntry { address, .. })| {
+                    self.selected_client.is_none_or(|y| address == &Some(y))
+                })
+                .filter(|(_, LogEntry { level, .. })| *level >= self.log_level)
+                .map(|(index, entry)| view_log(&self.style, index, entry).boxed()),
+            || {
                 rule::horizontal(2)
                     .style(|t: &Theme| rule::Style {
                         color: t.palette().background.weak.color,
                         ..rule::default(t)
                     })
                     .boxed()
-            })
-            .peekable();
+            },
+        )
+        .peekable();
 
         column![
             self.selected_client
@@ -1220,7 +1224,7 @@ fn view_progress<'a>(progress: &'a FFmpegProgress, style: &Style) -> impl Widget
             text(progress.frame).font(bold),
             text(progress.fps).font(bold),
             text(progress.q).font(bold),
-            text(&progress.bitrate).font(bold),
+            text(progress.bitrate).font(bold),
             text(format!("{:?}", progress.time)).font(bold),
             text(progress.speed).font(bold),
         ]
