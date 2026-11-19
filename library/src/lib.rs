@@ -163,9 +163,10 @@ impl FromStr for LogLevel {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Ok(match s {
+            "trace" | "debug" | "verbose" => Self::Trace,
             "info" => Self::Info,
             "warning" => Self::Warning,
-            "error" => Self::Error,
+            "error" | "fatal" | "panic" => Self::Error,
             _ => return Err(s.to_owned()),
         })
     }
