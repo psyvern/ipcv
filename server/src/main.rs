@@ -11,8 +11,8 @@ use futures::SinkExt;
 use futures::StreamExt;
 use futures::channel::mpsc::UnboundedReceiver;
 use indexmap::IndexMap;
+use jiff::ZonedDateTime;
 use jiff::civil::DateTime;
-use jiff::{Timestamp, ZonedDateTime};
 use library::MapSender;
 use library::TermMode;
 use library::is_closing_key;
@@ -85,34 +85,10 @@ enum ClientStatus {
 
 #[derive(Debug)]
 struct ClientInfo {
-    host: String,
+    name: String,
     port: u16,
     time: DateTime,
     status: ClientStatus,
-}
-
-fn print_clients(clients: &IndexMap<IpAddr, ClientInfo>) {
-    let length = clients
-        .values()
-        .map(|x| x.host.len())
-        .max()
-        .unwrap_or_default()
-        .max("host".len());
-    let separator = format!("+-----------------+-{}-+", "-".repeat(length));
-
-    println!();
-    println!("{separator}");
-    println!("| address         | {:length$} |", "host");
-    println!("{separator}");
-    for (address, info) in clients {
-        println!(
-            "| {} | {} |",
-            format!("{:<15}", address).bright_green().bold(),
-            format!("{:<length$}", info.host).bright_blue().bold()
-        )
-    }
-    println!("{separator}");
-    println!();
 }
 
 struct ClientData {
@@ -355,11 +331,10 @@ async fn loop_iteration(
         }
         Ok(cmd) = gui_rx.recv() => {
             match cmd {
-                InterfaceMessage::PrintClients => print_clients(clients),
                 InterfaceMessage::DisconnectClient(address) => {
                     if let Some(client) = clients.get_mut(&address)
                         && let ClientStatus::Connected { sender, .. } = &client.status {
-                            println!("Closing connection to `{}`", client.host);
+                            println!("Closing connection to `{}`", client.name);
                             let msg = ServerMessage::Close { force: false };
                             let _ = data_socket_2.send((msg, (address, client.port).into())).await;
                             let _ = sender.send(InfraThreadMessage::Close).await;
@@ -402,9 +377,9 @@ async fn loop_iteration(
 
                         let (infra_thread_tx, infra_thread_rx) = tokio::sync::mpsc::channel(10);
                         let directory = settings.output.join(format!(
-                            "{:?} - {}",
-                            Timestamp::now().as_second(),
-                            client.host,
+                            "{} - {}",
+                            ZonedDateTime::now().strftime("%Y-%m-%d %H-%M-%S"),
+                            client.name,
                         ));
                         std::fs::create_dir(&directory);
 
@@ -496,7 +471,7 @@ async fn loop_iteration(
                 );
 
                 let info = ClientInfo {
-                    host: name,
+                    name,
                     port,
                     time: ZonedDateTime::now().into(),
                     status: ClientStatus::Waiting,
@@ -564,7 +539,7 @@ pub async fn server_loop(
         if let Some(force) = force {
             for (address, info) in clients {
                 if let ClientStatus::Connected { sender, .. } = info.status {
-                    println!("Closing connection to `{}`", info.host);
+                    println!("Closing connection to `{}`", info.name);
                     let _ = socket_2
                         .send((ServerMessage::Close { force }, (address, info.port).into()))
                         .await;
@@ -587,11 +562,6 @@ pub async fn server_loop(
 fn map_key(event: KeyEvent) -> Option<InterfaceMessage> {
     match event {
         KeyEvent {
-            code: KeyCode::Char('h'),
-            modifiers: KeyModifiers::NONE,
-            ..
-        } => Some(InterfaceMessage::PrintClients),
-        KeyEvent {
             code: KeyCode::Char('q'),
             modifiers: KeyModifiers::NONE,
             ..
@@ -607,8 +577,14 @@ fn map_key(event: KeyEvent) -> Option<InterfaceMessage> {
 }
 
 fn main() -> iced::Result {
-    let args = Args::parse();
+    let mut args = Args::parse();
     println!("{args:?}");
+
+    args.output = args.output.join(
+        ZonedDateTime::now()
+            .strftime("%Y-%m-%d %H-%M-%S")
+            .to_string(),
+    );
 
     std::fs::create_dir_all(&args.output).unwrap();
 
@@ -655,7 +631,6 @@ fn main() -> iced::Result {
 
 #[derive(Debug, Clone)]
 pub enum InterfaceMessage {
-    PrintClients,
     AcceptClient(IpAddr),
     DisconnectClient(IpAddr),
     AllowClient(IpAddr),
