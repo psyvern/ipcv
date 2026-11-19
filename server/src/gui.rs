@@ -513,6 +513,12 @@ impl State {
                     return self.update(Message::Rotate(selected, clockwise));
                 }
             }
+            Message::OpenFolderCurrent => {
+                if let Some(selected) = self.selected_client {
+                    self.gui_tx
+                        .unbounded_send(InterfaceMessage::OpenFolder(Some(selected)));
+                }
+            }
             Message::Deselect => self.selected_client = None,
             Message::CopyLog(index) => {
                 if let Some(log) = self.log.get(index) {
@@ -843,6 +849,12 @@ impl State {
                         {
                             Message::ToggleSidebar
                         }
+                        (Key::Character("o"), modifiers)
+                            if modifiers == Modifiers::CTRL | Modifiers::SHIFT =>
+                        {
+                            InterfaceMessage::OpenFolder(None).into()
+                        }
+                        (Key::Character("o"), Modifiers::NONE) => Message::OpenFolderCurrent,
                         (Key::Character("r"), Modifiers::NONE) => Message::RotateCurrent(false),
                         (Key::Character("r"), Modifiers::SHIFT) => Message::RotateCurrent(true),
                         (Key::Named(Named::ArrowLeft), Modifiers::NONE) => Message::SelectPrevious,
@@ -969,6 +981,7 @@ enum Message {
     SwapNext,
     SwapPrevious,
     RotateCurrent(bool),
+    OpenFolderCurrent,
     Deselect,
     PaneResized(pane_grid::ResizeEvent),
     CopyLog(usize),
@@ -1104,9 +1117,9 @@ fn view_client<'a>(
                                         }
                                     })
                                     .padding(4)
-                                    .on_press(InterfaceMessage::OpenFolder(address).into()),
+                                    .on_press(InterfaceMessage::OpenFolder(Some(address)).into()),
                                 "Open directory",
-                                "E",
+                                "O",
                                 Modifiers::NONE,
                                 style.monospace,
                             ),

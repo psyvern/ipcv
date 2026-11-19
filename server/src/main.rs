@@ -460,8 +460,14 @@ async fn loop_iteration(
                     }
                 }
                 InterfaceMessage::OpenFolder(address) => {
-                    if let Some(ClientStatus::Connected { directory, ..}) = clients.get(&address).map(|x| &x.status) {
-                        if let Err(e) = open::that_detached(directory) {
+                    match address {
+                        Some(address) => {
+                            if let Some(ClientStatus::Connected { directory, ..}) = clients.get(&address).map(|x| &x.status)
+                                && let Err(e) = open::that_detached(directory) {
+                                eprintln!("Cannot open folder: {e}");
+                            }
+                        }
+                        None => if let Err(e) = open::that_detached(&settings.output) {
                             eprintln!("Cannot open folder: {e}");
                         }
                     }
@@ -654,6 +660,6 @@ pub enum InterfaceMessage {
     DisconnectClient(IpAddr),
     AllowClient(IpAddr),
     DenyClient(IpAddr),
-    OpenFolder(IpAddr),
+    OpenFolder(Option<IpAddr>),
     Shutdown { force: bool },
 }
