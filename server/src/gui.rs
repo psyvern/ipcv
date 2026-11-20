@@ -641,7 +641,7 @@ impl State {
                     button(Icon::FolderOpen.widget().size(24))
                         .padding(8)
                         .style(iced::widget::button::text)
-                        .on_press(Message::ToggleAutoAccept),
+                        .on_press(InterfaceMessage::OpenFolder(None).into()),
                     "Open directory",
                     "O",
                     Modifiers::CTRL | Modifiers::SHIFT,
