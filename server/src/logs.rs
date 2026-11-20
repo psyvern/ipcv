@@ -1,5 +1,6 @@
 use std::{fmt::Display, net::IpAddr};
 
+use colored::Colorize;
 use itertools::Itertools;
 use jiff::{ZonedDateTime, civil::DateTime};
 use library::{LogLevel, threads::FFmpegProgress};
@@ -40,16 +41,25 @@ impl LogEntry {
         Self::new(LogLevel::Info, address, message)
     }
 
+    pub fn to_console_line(&self) -> String {
+        format!(
+            "{}{} {}",
+            self.level.fixed_string().color(self.level.color()).bold(),
+            self.address
+                .as_ref()
+                .map(|x| format!(" {x}"))
+                .unwrap_or_default()
+                .bright_blue()
+                .bold(),
+            self.message.to_console_line(),
+        )
+    }
+
     pub fn to_file_line(&self) -> String {
         format!(
             "({}) {}: {}",
             self.time.strftime("%Y-%m-%d %H:%M:%S"),
-            match self.level {
-                LogLevel::Trace => "TRACE",
-                LogLevel::Info => " INFO",
-                LogLevel::Warning => " WARN",
-                LogLevel::Error => "ERROR",
-            },
+            self.level.fixed_string(),
             self.message,
         )
     }
@@ -83,6 +93,13 @@ pub enum LogMessage {
 impl LogMessage {
     pub fn should_log(&self) -> bool {
         !matches!(self, Self::Frame { .. } | Self::Progress(_))
+    }
+
+    pub fn to_console_line(&self) -> String {
+        match self {
+            Self::Connected { name } => format!("Connected as {}", name.bold()),
+            _ => self.to_string(),
+        }
     }
 }
 

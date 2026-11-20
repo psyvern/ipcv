@@ -1,6 +1,7 @@
 pub mod messages;
 pub mod threads;
 
+use colored::Color;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use futures::{Sink, SinkExt};
 use itertools::Itertools;
@@ -132,28 +133,37 @@ pub struct LogLine {
     pub message: String,
 }
 
-impl Display for LogLine {
+impl LogLevel {
+    pub fn fixed_string(self) -> &'static str {
+        match self {
+            Self::Trace => "TRACE",
+            Self::Info => " INFO",
+            Self::Warning => " WARN",
+            Self::Error => "ERROR",
+        }
+    }
+
+    pub fn color(self) -> Color {
+        match self {
+            Self::Trace => Color::BrightCyan,
+            Self::Info => Color::BrightGreen,
+            Self::Warning => Color::BrightYellow,
+            Self::Error => Color::BrightRed,
+        }
+    }
+}
+
+impl Display for LogLevel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "[\x1b[{};1m{}\x1b[0m] {}{}",
-            match self.level {
-                LogLevel::Trace => "96",
-                LogLevel::Info => "92",
-                LogLevel::Warning => "93",
-                LogLevel::Error => "91",
-            },
-            match self.level {
-                LogLevel::Trace => "trace",
-                LogLevel::Info => " info",
-                LogLevel::Warning => " warn",
-                LogLevel::Error => "error",
-            },
-            self.parts
-                .iter()
-                .map(|(a, b)| format!("[{a} @ 0x{b:X}] "))
-                .collect::<String>(),
-            self.message
+            "{}",
+            match self {
+                Self::Trace => "trace",
+                Self::Info => "info",
+                Self::Warning => "warning",
+                Self::Error => "error",
+            }
         )
     }
 }

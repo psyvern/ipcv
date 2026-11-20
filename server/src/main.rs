@@ -13,7 +13,6 @@ use futures::channel::mpsc::UnboundedReceiver;
 use indexmap::IndexMap;
 use jiff::ZonedDateTime;
 use jiff::civil::DateTime;
-use library::MapSender;
 use library::TermMode;
 use library::is_closing_key;
 use library::messages::ClientMessage;
@@ -21,6 +20,7 @@ use library::messages::ServerMessage;
 use library::messages::{BinCodec, ClientInitialMessage};
 use library::threads::{StderrMessage, stderr_stream, stdout_stream};
 use library::{CustomSender, LogLine};
+use library::{LogLevel, MapSender};
 use send_ctrlc::tokio::InterruptibleChild;
 use send_ctrlc::{Interruptible, InterruptibleCommand};
 use std::io::Write;
@@ -67,6 +67,9 @@ pub struct Args {
     /// Output directory
     #[arg(long, short, default_value = "output")]
     output: PathBuf,
+    /// Log level of the command line
+    #[arg(long, short, default_value_t = LogLevel::Info)]
+    level: LogLevel,
     /// Enable Terminal User Interface (TUI) alongside the GUI
     #[arg(long)]
     pub tui: bool,
@@ -309,6 +312,7 @@ async fn loop_iteration(
     data_socket: &Arc<UdpSocket>,
     listener: &mut TcpListener,
     log_input: &mut broadcast::Receiver<LogEntry>,
+    log_file: &mut File,
     output: &mut broadcast::Sender<LogEntry>,
     gui_rx: &mut UnboundedReceiver<InterfaceMessage>,
 ) -> Option<bool> {
@@ -319,14 +323,20 @@ async fn loop_iteration(
 
     select! {
         Ok(entry) = log_input.recv() => {
+            if entry.level >= settings.level {
+                println!("{}", entry.to_console_line());
+            }
+
             match entry.address {
                 Some(address) => {
                     if let Some(client) = clients.get_mut(&address)
                         && let ClientStatus::Connected { log_file, .. } = &mut client.status {
-                        writeln!(log_file, "{}", entry.to_file_line());
+                        let _ = writeln!(log_file, "{}", entry.to_file_line());
                     }
                 },
-                None => println!("{}", entry.to_file_line()),
+                None => {
+                    let _ = writeln!(log_file, "{}", entry.to_file_line());
+                },
             }
         }
         Ok(cmd) = gui_rx.recv() => {
@@ -334,7 +344,6 @@ async fn loop_iteration(
                 InterfaceMessage::DisconnectClient(address) => {
                     if let Some(client) = clients.get_mut(&address)
                         && let ClientStatus::Connected { sender, .. } = &client.status {
-                            println!("Closing connection to `{}`", client.name);
                             let msg = ServerMessage::Close { force: false };
                             let _ = data_socket_2.send((msg, (address, client.port).into())).await;
                             let _ = sender.send(InfraThreadMessage::Close).await;
@@ -394,7 +403,6 @@ async fn loop_iteration(
                                     return None;
                                 }
                                 Err(_) => {
-                                    eprintln!("Client {address} did not connect, removing it");
                                     clients.shift_remove(&address);
                                     let _ = output.send(LogEntry::info(address, LogMessage::Denied));
                                     return None;
@@ -464,12 +472,6 @@ async fn loop_iteration(
                 }
                 let _ = output.send(LogEntry::info(address, LogMessage::Connected { name: name.clone() }));
 
-                println!(
-                    "Added address {} as host {}",
-                    address.to_string().bright_green().bold(),
-                    name.bright_blue().bold()
-                );
-
                 let info = ClientInfo {
                     name,
                     port,
@@ -482,9 +484,6 @@ async fn loop_iteration(
         Some(x) = join_set.join_next() => {
             if let Ok(address) = x
                 && let Some(_) = clients.shift_remove(&address) {
-                    println!(
-                        "Removed address {} from clients", address.to_string().bright_green().bold(),
-                    );
                     let _ = output.send(LogEntry::info(address, LogMessage::Denied));
                 }
         }
@@ -506,6 +505,8 @@ pub async fn server_loop(
     } else {
         None
     };
+
+    let mut log_file = File::create(args.output.join("output.log"))?;
 
     let socket =
         Arc::new(UdpSocket::bind((library::unspecified_from(args.group), args.port)).await?);
@@ -531,6 +532,7 @@ pub async fn server_loop(
             &socket,
             &mut listener,
             &mut log_input,
+            &mut log_file,
             output,
             &mut gui_rx,
         )
@@ -539,7 +541,6 @@ pub async fn server_loop(
         if let Some(force) = force {
             for (address, info) in clients {
                 if let ClientStatus::Connected { sender, .. } = info.status {
-                    println!("Closing connection to `{}`", info.name);
                     let _ = socket_2
                         .send((ServerMessage::Close { force }, (address, info.port).into()))
                         .await;

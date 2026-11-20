@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 async-stream.workspace = true
 bytes.workspace = true
+colored.workspace = true
 crossterm.workspace = true
 futures.workspace = true
 itertools.workspace = true

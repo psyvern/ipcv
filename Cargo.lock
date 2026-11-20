@@ -2285,6 +2285,7 @@ version = "0.1.0"
 dependencies = [
  "async-stream",
  "bytes",
+ "colored",
  "crossterm",
  "futures",
  "itertools 0.15.0",
